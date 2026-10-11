@@ -63,6 +63,8 @@ pub enum Cmd {
         id: String,
     },
     Batch(Vec<Cmd>),
+    /// Checkpoints and answers once every earlier command is written ([`Db::sync`]).
+    Sync(Sender<()>),
 }
 
 impl Cmd {
@@ -156,6 +158,13 @@ impl Db {
         }
     }
 
+    /// Blocks until everything sent so far is written to the database file.
+    pub fn sync(&self) {
+        let (done_tx, done_rx) = mpsc::channel();
+        self.send(Cmd::Sync(done_tx));
+        let _ = done_rx.recv_timeout(std::time::Duration::from_secs(10));
+    }
+
     pub fn pending(&self) -> usize {
         self.pending.load(Ordering::SeqCst)
     }
@@ -245,6 +254,11 @@ impl Store {
                     }
                 }
                 first_err.map_or(Ok(()), Err)
+            }
+            Cmd::Sync(done) => {
+                self.checkpoint();
+                let _ = done.send(());
+                Ok(())
             }
         }
     }

@@ -18,7 +18,7 @@ use crate::i18n::{self, Lang, t, tf};
 use crate::settings::{self, Appearance, Settings};
 use crate::store::{self, Db};
 use crate::ui;
-use crate::update::{self, Check};
+use crate::update::{self, Check, Downloaded, Release};
 
 const LOGO: &[u8] = include_bytes!("../assets/icon-256.png");
 const DIALOG_W: f32 = 820.0;
@@ -104,7 +104,19 @@ enum UpdateState {
     Idle,
     Checking,
     Done(Check),
+    /// Fetching the installer in the background.
+    Downloading(Release),
+    /// Installer verified; installs on [`ShellMessage::InstallUpdate`].
+    Ready(Release, Downloaded),
+    /// Already translated message.
     Failed(String),
+}
+
+/// A new version and the button that gets it ([`Shell::update_offer`]).
+struct UpdateOffer {
+    text: String,
+    action: &'static str,
+    message: ShellMessage,
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +140,8 @@ pub enum ShellMessage {
     // updates
     CheckUpdates,
     UpdateChecked(Result<Check, String>),
+    UpdateDownloaded(Result<Downloaded, String>),
+    InstallUpdate,
     DismissUpdate,
     OpenPath(PathBuf),
     OpenUrl(String),
@@ -347,9 +361,36 @@ impl Shell {
             }
             ShellMessage::UpdateChecked(result) => {
                 self.update = match result {
+                    Ok(Check::Available(release)) if release.package.is_some() => {
+                        let package = release.package.clone().expect("checked above");
+                        self.update = UpdateState::Downloading(release);
+                        return Task::perform(
+                            update::download_async(package),
+                            ShellMessage::UpdateDownloaded,
+                        );
+                    }
                     Ok(check) => UpdateState::Done(check),
-                    Err(e) => UpdateState::Failed(e),
+                    Err(e) => UpdateState::Failed(tf("Update check failed: {}", &[&e])),
                 };
+            }
+            ShellMessage::UpdateDownloaded(result) => {
+                if let UpdateState::Downloading(release) = &self.update {
+                    self.update = match result {
+                        Ok(downloaded) => UpdateState::Ready(release.clone(), downloaded),
+                        Err(e) => UpdateState::Failed(tf("Update failed: {}", &[&e])),
+                    };
+                }
+            }
+            ShellMessage::InstallUpdate => {
+                if let UpdateState::Ready(_, downloaded) = &self.update {
+                    if let Some(app) = &mut self.app {
+                        app.shutdown();
+                        app.db.sync();
+                    }
+                    // returns only on failure; success restarts the app
+                    let Err(e) = update::install(downloaded.clone());
+                    self.update = UpdateState::Failed(tf("Update failed: {}", &[&e]));
+                }
             }
             ShellMessage::DismissUpdate => self.update_dismissed = true,
             ShellMessage::OpenPath(path) => {
@@ -431,8 +472,10 @@ impl Shell {
         };
 
         let mut page = Column::new();
-        if let Some(release) = self.available_update() {
-            page = page.push(self.view_update_banner(release)).push(hline());
+        if !self.update_dismissed
+            && let Some(offer) = self.update_offer()
+        {
+            page = page.push(self.view_update_banner(offer)).push(hline());
         }
         let page = page.push(container(main).height(Length::Fill));
 
@@ -442,26 +485,33 @@ impl Shell {
         }
     }
 
-    fn available_update(&self) -> Option<&update::Release> {
+    /// What the user can do about a new version: a downloaded update to install, or (for builds
+    /// that cannot update themselves) the release page to open.
+    fn update_offer(&self) -> Option<UpdateOffer> {
         match &self.update {
-            UpdateState::Done(Check::Available(release)) if !self.update_dismissed => {
-                Some(release)
-            }
+            UpdateState::Ready(release, _) => Some(UpdateOffer {
+                text: tf("Version {} is ready to install.", &[&release.version]),
+                action: t("Restart now"),
+                message: ShellMessage::InstallUpdate,
+            }),
+            UpdateState::Done(Check::Available(release)) => Some(UpdateOffer {
+                text: tf("Version {} is available.", &[&release.version]),
+                action: t("Download"),
+                message: ShellMessage::OpenUrl(release.url.clone()),
+            }),
             _ => None,
         }
     }
 
-    fn view_update_banner(&self, release: &update::Release) -> Element<'_, ShellMessage> {
+    fn view_update_banner(&self, offer: UpdateOffer) -> Element<'_, ShellMessage> {
         container(
             row![
                 icon("✦").size(14).color(ui::pal().accent),
-                text(tf("Version {} is available.", &[&release.version]))
-                    .size(13)
-                    .width(Length::Fill),
-                button(text(t("Download")).size(12))
+                text(offer.text).size(13).width(Length::Fill),
+                button(text(offer.action).size(12))
                     .padding([4, 12])
                     .style(ui::primary)
-                    .on_press(ShellMessage::OpenUrl(release.url.clone())),
+                    .on_press(offer.message),
                 button(text(t("Dismiss")).size(12))
                     .padding([4, 12])
                     .style(ui::secondary)
@@ -781,28 +831,35 @@ impl Shell {
             ]
             .spacing(6)
             .into(),
-            UpdateState::Done(Check::Available(release)) => row![
-                text(tf("Version {} is available.", &[&release.version]))
+            UpdateState::Done(Check::Available(_)) | UpdateState::Ready(..) => {
+                let offer = self.update_offer().expect("new version on offer");
+                row![
+                    text(offer.text).size(13).width(Length::Fill),
+                    button(text(offer.action).size(13))
+                        .padding([6, 12])
+                        .style(ui::primary)
+                        .on_press(offer.message),
+                ]
+                .spacing(8)
+                .align_y(alignment::Vertical::Center)
+                .into()
+            }
+            UpdateState::Downloading(release) => {
+                text(tf("Downloading version {}…", &[&release.version]))
                     .size(13)
-                    .width(Length::Fill),
-                button(text(t("Download")).size(13))
-                    .padding([6, 12])
-                    .style(ui::primary)
-                    .on_press(ShellMessage::OpenUrl(release.url.clone())),
-            ]
-            .spacing(8)
-            .align_y(alignment::Vertical::Center)
-            .into(),
-            UpdateState::Failed(e) => text(tf("Update check failed: {}", &[e]))
-                .size(13)
-                .color(ui::pal().danger)
-                .into(),
+                    .color(ui::pal().muted)
+                    .into()
+            }
+            UpdateState::Failed(e) => text(e).size(13).color(ui::pal().danger).into(),
         };
 
         let mut check = button(icon_label("⟳", t("Check now")))
             .padding([7, 14])
             .style(ui::secondary);
-        if !matches!(self.update, UpdateState::Checking) {
+        if !matches!(
+            self.update,
+            UpdateState::Checking | UpdateState::Downloading(_) | UpdateState::Ready(..)
+        ) {
             check = check.on_press(ShellMessage::CheckUpdates);
         }
 
@@ -816,7 +873,7 @@ impl Shell {
             ),
             setting(
                 t("AUTOMATIC CHECK"),
-                t("Looks for a new release on GitHub when Wurzelwerk starts."),
+                t("Looks for a new release when Wurzelwerk starts and downloads it in the background."),
                 checkbox(self.settings.check_updates)
                     .label(t("Check for updates on start"))
                     .on_toggle(ShellMessage::SetCheckUpdates)
