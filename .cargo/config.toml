@@ -1,2 +1,3 @@
 [env]
-PROTOC = { value = "./bin/protoc.exe", force = true, relative = true }
+# Bundled protoc for Windows; not forced, so CI (Linux/macOS) can point PROTOC at a native one.
+PROTOC = { value = "./bin/protoc.exe", relative = true }
