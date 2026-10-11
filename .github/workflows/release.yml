@@ -1,0 +1,145 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - "v*" # Triggers on tags like v1.2.3 or 1.2.3
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    name: Validate Versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check version match
+        run: |
+          # Extract tag version (strips 'refs/tags/' and optional 'v')
+          TAG_VERSION=${GITHUB_REF#refs/tags/}
+          TAG_VERSION=${TAG_VERSION#v}
+
+          # Extract Cargo.toml version
+          CARGO_VERSION=$(grep '^version' Cargo.toml | head -n 1 | cut -d '"' -f 2)
+
+          # Extract CHANGELOG.md version (looks for the first H2 header containing a version number)
+          CHANGELOG_VERSION=$(grep -m 1 -E '^## \[[0-9]' CHANGELOG.md | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9\.-]+)?')
+
+          echo "Tag: $TAG_VERSION | Cargo: $CARGO_VERSION | Changelog: $CHANGELOG_VERSION"
+
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ] || [ "$TAG_VERSION" != "$CHANGELOG_VERSION" ]; then
+            echo "❌ Version mismatch! Build aborted."
+            exit 1
+          fi
+          echo "✅ All versions match!"
+
+  build:
+    name: Build (${{ matrix.os }})
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          # Each runner builds the installers of its own OS (features/todo-notes/14-platform.md).
+          - os: ubuntu-latest
+            formats: deb,appimage
+          - os: macos-latest
+            formats: app,dmg
+          - os: windows-latest
+            formats: nsis,wix
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libgtk-3-dev
+
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --locked
+
+      # cargo-packager signs whenever CARGO_PACKAGER_SIGN_PRIVATE_KEY is set,
+      # even to an empty string (a missing secret), and then fails with
+      # "Missing comment in secret key". Only export it when the secret has a
+      # value, without stray whitespace from pasting.
+      - name: Load the updater signing key
+        shell: bash
+        env:
+          KEY: ${{ secrets.FLOETASK_UPDATE_PRIVATE_KEY }}
+          PASSWORD: ${{ secrets.FLOETASK_UPDATE_KEY_PASSWORD }}
+        run: |
+          KEY="$(printf '%s' "$KEY" | tr -d '[:space:]')"
+          if [ -n "$KEY" ]; then
+            echo "CARGO_PACKAGER_SIGN_PRIVATE_KEY=$KEY" >> "$GITHUB_ENV"
+            echo "CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
+            echo "Signing installers for the updater."
+          else
+            echo "::warning::FLOETASK_UPDATE_PRIVATE_KEY is not set: installers are not signed and this release cannot be offered as an update."
+          fi
+
+      - name: Build installers
+        run: cargo packager --release -p floetask-app --formats ${{ matrix.formats }}
+        env:
+          # The AppImage tooling is itself an AppImage; runners have no FUSE.
+          APPIMAGE_EXTRACT_AND_RUN: 1
+          # Compiled into the app: where the updater looks and which key it
+          # trusts (features/todo-notes/14-platform.md §14.2). Without them the build
+          # works but cannot update itself.
+          FLOETASK_UPDATE_ENDPOINT: https://github.com/${{ github.repository }}/releases/latest/download/latest.json
+          FLOETASK_UPDATE_PUBLIC_KEY: ${{ vars.FLOETASK_UPDATE_PUBLIC_KEY }}
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v6
+        with:
+          name: installers-${{ matrix.os }}
+          # The .app bundle is a folder; the .dmg carries it for release.
+          path: |
+            target/packages/*.exe
+            target/packages/*.msi
+            target/packages/*.dmg
+            target/packages/*.deb
+            target/packages/*.AppImage
+            target/packages/*.app.tar.gz
+            target/packages/*.sig
+
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6   # needed to read CHANGELOG.md
+
+      - name: Extract changelog section
+        run: |
+          TAG_VERSION=${GITHUB_REF#refs/tags/}
+          TAG_VERSION=${TAG_VERSION#v}
+          awk -v ver="$TAG_VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { flag=1; next }
+            flag && /^## \[/ { flag=0 }
+            flag { print }
+          ' CHANGELOG.md > release_notes.md
+          cat release_notes.md
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v6
+        with:
+          path: artifacts
+
+      - name: Write the updater manifest
+        run: python3 scripts/update-manifest.py artifacts "$GITHUB_REF_NAME" "$GITHUB_REPOSITORY" release_notes.md artifacts/latest.json
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release_notes.md
+          files: artifacts/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
