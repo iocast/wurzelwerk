@@ -5,6 +5,12 @@ Format: Keep a Changelog (https://keepachangelog.com), versioning: Semantic Vers
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-11
+
+### Fixed
+- Release builds now produce the installers: Windows (`.exe`, `.msi`), macOS (`.dmg`) and Linux (`.deb`, `.AppImage`)
+- Building from source on Linux and macOS works with a native protoc: set `PROTOC` to its path (the bundled Windows `protoc.exe` was always used before)
+
 ## [0.1.0] - 2026-10-11
 
 ### Added
@@ -21,5 +27,6 @@ Format: Keep a Changelog (https://keepachangelog.com), versioning: Semantic Vers
 - Update check against the latest GitHub release at start-up or via *Settings → Updates → Check now*; can be turned off
 - Large boards with 10 000 people stay smooth; `--demo RxC` generates such a board for load testing
 
-[unreleased]: https://github.com/iocast/wurzelwerk/compare/v0.1.0...HEAD
+[unreleased]: https://github.com/iocast/wurzelwerk/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/iocast/wurzelwerk/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/iocast/wurzelwerk/releases/tag/v0.1.0
