@@ -1,0 +1,28 @@
+[package]
+name = "wurzelwerk"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "Wurzelwerk - family / clan board, iced 0.14 + embedded RedDB (document model)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# UI - GPU (wgpu) renderer, canvas for the board, tokio executor for async tasks/timers
+iced = { version = "0.14.0", features = ["canvas", "image", "tokio"] }
+# Embedded multi-model DB (crate name reddb-io, import path `reddb::`)
+reddb-io = { version = "1.23.4", features = ["embedded"] }
+reddb_types = { package = "reddb-io-types", version = "1.23.4" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+uuid = { version = "1.28.0", features = ["v4"] }
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
+iced-markdown-editor = "0.3.0"
+ureq = { version = "3.4.2", features = ["json"] }
+sys-locale = "0.3.2"
+
+[profile.release]
+lto = false # thin LTO drops symbols between reddb-io-server and axum/tokio (LNK2019)
+codegen-units = 1
+
+[profile.dev.package."*"]
+opt-level = 2 # keep wgpu/lyon/reddb fast in debug builds

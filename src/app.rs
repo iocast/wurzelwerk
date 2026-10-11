@@ -1,0 +1,1887 @@
+//! Application state, update and view (toolbar · clans/people · board · inspector · status).
+
+use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::path::PathBuf;
+use std::time::Duration;
+
+use iced::font::Weight;
+use iced_markdown_editor::{
+    Action, EditorState, Event as EditorEvent, Paper, ZoomSettings, markdown_editor,
+};
+use iced::widget::{
+    Column, Row, Text, button, canvas, column, container, pick_list, row, scrollable, text, text_input,
+};
+use iced::{
+    Element, Event, Font, Length, Point, Rectangle, Size, Subscription, Task, Vector,
+    alignment, event, keyboard, window,
+};
+
+use crate::board::Board;
+use crate::camera::Camera;
+use crate::files;
+use crate::i18n::{t, tf};
+use crate::notes::{self, Book, NoteKey};
+use crate::layout;
+use crate::routing::Routes;
+use crate::shell::SettingsPage;
+use crate::model::{
+    Clan, Data, FileRec, Id, LINK_PRESETS, Link, LinkLabelPosition, LinkStyle, NODE_H, NODE_W,
+    PALETTE, Person, link_style, new_id,
+};
+use crate::spatial::{self, Grid, Hull};
+use crate::store::{CLANS, Cmd, Db, FILES, LINKS, PEOPLE};
+use crate::ui;
+
+const SIDEBAR_W: f32 = 220.0;
+const INSPECTOR_W: f32 = 300.0;
+const TOOLBAR_H: f32 = 52.0;
+const STATUS_H: f32 = 28.0;
+const MAX_PEOPLE_LIST: usize = 150;
+const MAX_LINES_LIST: usize = 100;
+
+// ---------------------------------------------------------------------------
+// config / boot
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct Config {
+    /// Project folder: holds `wurzelwerk.rdb`, `person/` and `notes/`.
+    pub project: PathBuf,
+    /// `--demo <clans>x<people per clan>` - only applied to an empty project.
+    pub demo: Option<(usize, usize)>,
+}
+
+/// Everything `boot` needs. Clone-able so the boot fn stays `Fn`.
+#[derive(Debug, Clone)]
+pub struct Init {
+    pub cfg: Config,
+    pub db: Db,
+    pub data: Data,
+}
+
+// ---------------------------------------------------------------------------
+// state
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tool {
+    Select,
+    AddPerson,
+    Connect,
+    Clan,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingLink {
+    pub from: Id,
+    pub to: Id,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClanChoice {
+    pub id: Id,
+    pub name: String,
+}
+
+impl fmt::Display for ClanChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.name)
+    }
+}
+
+/// A markdown note (person, clan or book page) open in the editor.
+pub struct OpenNote {
+    pub key: NoteKey,
+    pub editor: EditorState,
+    /// Editable page name (book pages only).
+    pub name: String,
+    /// Editable book name (book pages only).
+    pub book_name: String,
+    /// Unsaved changes (flushed on tick / close / switch).
+    pub dirty: bool,
+}
+
+pub struct App {
+    pub cfg: Config,
+    pub db: Db,
+    pub data: Data,
+    pub grid: Grid,
+    pub hulls: HashMap<Id, Hull>,
+    /// Routed lines, kept in sync with `data` after every update.
+    pub routes: Routes,
+    pub clan_counts: HashMap<Id, usize>,
+    pub camera: Camera,
+    pub canvas_size: Size,
+    pub cache: canvas::Cache,
+    pub tool: Tool,
+    pub selected: Option<Id>,
+    pub selected_link: Option<Id>,
+    pub selected_link_vertex: Option<usize>,
+    pub active_clan: Option<Id>,
+    pub show_clan: bool,
+    pub search: String,
+    pub pending_link: Option<PendingLink>,
+    /// Person with unsaved text edits (flushed on submit / selection change / tick).
+    pub dirty: Option<Id>,
+    pub notice: Option<String>,
+    /// Markdown editor shown in place of the board.
+    pub note: Option<OpenNote>,
+    /// Global documentation books found in `notes/books`.
+    pub books: Vec<Book>,
+    /// Person / clan ids that have a non-empty markdown note (board indicator).
+    pub with_notes: HashSet<Id>,
+    /// Person ids that have attached files (board indicator).
+    pub with_files: HashSet<Id>,
+}
+
+#[derive(Debug, Clone)]
+pub enum Message {
+    // toolbar
+    Tool(Tool),
+    AutoLayout,
+    FitToWindow,
+    Search(String),
+    SearchSubmit,
+    // sidebar
+    SelectPerson(Option<Id>),
+    FocusPerson(Id),
+    SelectClan(Id),
+    NewClan,
+    // clan inspector
+    RenameClan(String),
+    CycleClanColor,
+    FitClan,
+    DeleteClan,
+    // board
+    ZoomAt(Point, f32),
+    PanBy(Vector),
+    NodeDragged(Id, Point),
+    NodeDropped(Id),
+    AddPersonAt(Point),
+    ToggleClan(Id),
+    ConnectRequested(Id, Id),
+    SelectLink(Id),
+    SelectLinkVertex(Id, usize, Vec<[f32; 2]>),
+    DeleteLinkVertex(Id, usize),
+    ResetLinkRoute(Id),
+    LinkRouteDragged(Id, Vec<[f32; 2]>, Option<LinkLabelPosition>, u8, u8),
+    LinkLabelDragged(Id, LinkLabelPosition),
+    LinkDropped(Id),
+    ClanLabelDragged(Id, [f32; 2]),
+    ClanLabelDropped(Id),
+    // line naming
+    LinkLabel(String),
+    LinkPreset(&'static str),
+    ConfirmLink,
+    CancelLink,
+    DeleteLink(Id),
+    // person inspector
+    EditName(String),
+    EditBorn(String),
+    EditDied(String),
+    CommitPerson,
+    DeletePerson,
+    AddToClan(ClanChoice),
+    RemoveFromClan(Id),
+    // files
+    ChooseFiles,
+    FilesChosen(Vec<PathBuf>),
+    FileDropped(PathBuf),
+    FilesImported(Result<Vec<FileRec>, String>),
+    OpenFile(Id),
+    DeleteFile(Id),
+    // notes & books
+    OpenNote(NoteKey),
+    CloseNote,
+    NoteEditor(Action),
+    NoteName(String),
+    RenameNote,
+    BookName(String),
+    RenameBook,
+    DeleteNote,
+    NewBook,
+    NewPage(String),
+    /// Handled by the shell (settings dialog), not by the workspace.
+    OpenSettings(SettingsPage),
+    // runtime
+    WindowResized(Size),
+    Escape,
+    DeleteKey,
+    Tick,
+}
+
+impl App {
+    pub fn boot(init: Init) -> (Self, Task<Message>) {
+        let Init { cfg, db, mut data } = init;
+
+        // one-time move from the old `files/<id>` and `notes/people/<id>.md` layout
+        for rec in files::migrate_legacy(&cfg.project, &mut data.files) {
+            db.send(Cmd::put(FILES, &rec.id, &rec, false));
+        }
+        notes::migrate_legacy(&cfg.project);
+
+        if data.people.is_empty()
+            && let Some((clans, per_clan)) = cfg.demo
+        {
+            let (c, p, l) = crate::demo::generate(clans, per_clan);
+            data = Data::from_parts(p, c, l, Vec::new());
+            layout::auto_layout(&mut data);
+            let mut cmds =
+                Vec::with_capacity(data.people.len() + data.links.len() + data.clans.len());
+            cmds.extend(data.clans.iter().map(|c| Cmd::put(CLANS, &c.id, c, true)));
+            cmds.extend(data.people.iter().map(|p| Cmd::put(PEOPLE, &p.id, p, true)));
+            cmds.extend(data.links.iter().map(|l| Cmd::put(LINKS, &l.id, l, true)));
+            db.send(Cmd::Batch(cmds));
+        }
+
+        let mut app = Self {
+            cfg,
+            db,
+            data,
+            grid: Grid::default(),
+            hulls: HashMap::new(),
+            routes: Routes::default(),
+            clan_counts: HashMap::new(),
+            camera: Camera::default(),
+            canvas_size: Size::new(
+                1440.0 - SIDEBAR_W - INSPECTOR_W,
+                900.0 - TOOLBAR_H - STATUS_H,
+            ),
+            cache: canvas::Cache::new(),
+            tool: Tool::Select,
+            selected: None,
+            selected_link: None,
+            selected_link_vertex: None,
+            active_clan: None,
+            show_clan: false,
+            search: String::new(),
+            pending_link: None,
+            dirty: None,
+            notice: None,
+            note: None,
+            books: Vec::new(),
+            with_notes: HashSet::new(),
+            with_files: HashSet::new(),
+        };
+        app.books = notes::scan_books(&app.cfg.project);
+        app.with_notes.extend(notes::noted_people(&app.cfg.project));
+        app.with_notes
+            .extend(notes::noted_ids(&app.cfg.project, "clans"));
+        app.refresh_file_marks();
+        app.rebuild_all();
+        app.fit_all();
+        (app, Task::none())
+    }
+
+    /// Folder name of the open workspace.
+    pub fn workspace_name(&self) -> String {
+        self.cfg
+            .project
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.cfg.project.display().to_string())
+    }
+
+    /// Writes pending edits; called before the workspace is closed or replaced.
+    pub fn shutdown(&mut self) {
+        self.flush_dirty();
+        self.flush_note();
+    }
+
+    pub fn subscription(&self) -> Subscription<Message> {
+        let events = event::listen_with(|ev, status, _window| match ev {
+            Event::Window(window::Event::FileDropped(path)) => Some(Message::FileDropped(path)),
+            Event::Window(window::Event::Resized(size)) => Some(Message::WindowResized(size)),
+            Event::Keyboard(keyboard::Event::KeyPressed { key, .. })
+                if status == event::Status::Ignored =>
+            {
+                match key {
+                    keyboard::Key::Named(keyboard::key::Named::Escape) => Some(Message::Escape),
+                    keyboard::Key::Named(keyboard::key::Named::Delete) => Some(Message::DeleteKey),
+                    _ => None,
+                }
+            }
+            _ => None,
+        });
+
+        let mut subs = vec![events];
+        if self.db.pending() > 0
+            || self.dirty.is_some()
+            || self.note.as_ref().is_some_and(|n| n.dirty)
+        {
+            subs.push(iced::time::every(Duration::from_millis(400)).map(|_| Message::Tick));
+        }
+        if let Some(note) = &self.note {
+            subs.push(note.editor.subscription().map(Message::NoteEditor));
+        }
+        Subscription::batch(subs)
+    }
+
+    // -----------------------------------------------------------------------
+    // queries used by the board
+    // -----------------------------------------------------------------------
+
+    pub fn selected_person(&self) -> Option<&Person> {
+        self.selected.as_deref().and_then(|id| self.data.person(id))
+    }
+
+    pub fn hit_test(&self, world: Point) -> Option<usize> {
+        let probe = Rectangle {
+            x: world.x,
+            y: world.y,
+            width: 1.0,
+            height: 1.0,
+        };
+        let mut hit = None;
+        self.grid.query(probe, |i| {
+            let p = &self.data.people[i as usize];
+            if world.x >= p.x
+                && world.x <= p.x + NODE_W
+                && world.y >= p.y
+                && world.y <= p.y + NODE_H
+            {
+                hit = Some(i as usize);
+            }
+        });
+        hit
+    }
+
+    // -----------------------------------------------------------------------
+    // derived data
+    // -----------------------------------------------------------------------
+
+    fn rebuild_all(&mut self) {
+        self.grid = Grid::build(&self.data.people);
+        self.hulls = spatial::all_hulls(&self.data.people, &self.data.clans);
+        self.routes.sync(&self.data);
+        self.recount();
+    }
+
+    fn recount(&mut self) {
+        self.clan_counts.clear();
+        for p in &self.data.people {
+            for c in &p.clans {
+                *self.clan_counts.entry(c.clone()).or_default() += 1;
+            }
+        }
+    }
+
+    fn rebuild_hulls_for(&mut self, clans: &[Id]) {
+        for c in clans {
+            match spatial::clan_hull(&self.data.people, c) {
+                Some(h) => {
+                    self.hulls.insert(c.clone(), h);
+                }
+                None => {
+                    self.hulls.remove(c);
+                }
+            }
+        }
+    }
+
+    fn world_bounds(&self) -> Option<Rectangle> {
+        let mut it = self.data.people.iter();
+        let first = it.next()?;
+        let (mut x0, mut y0, mut x1, mut y1) =
+            (first.x, first.y, first.x + NODE_W, first.y + NODE_H);
+        for p in it {
+            x0 = x0.min(p.x);
+            y0 = y0.min(p.y);
+            x1 = x1.max(p.x + NODE_W);
+            y1 = y1.max(p.y + NODE_H);
+        }
+        Some(Rectangle {
+            x: x0,
+            y: y0,
+            width: x1 - x0,
+            height: y1 - y0,
+        })
+    }
+
+    fn fit_all(&mut self) {
+        if let Some(bounds) = self.world_bounds() {
+            self.camera.fit(bounds, self.canvas_size);
+        }
+    }
+
+    fn focus(&mut self, id: &str) {
+        if let Some(p) = self.data.person(id) {
+            let center = Point::new(p.x + NODE_W / 2.0, p.y + NODE_H / 2.0);
+            self.camera.zoom = self.camera.zoom.max(0.9);
+            self.camera.center_on(center, self.canvas_size);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // persistence helpers
+    // -----------------------------------------------------------------------
+
+    fn save_person(&self, id: &str) {
+        if let Some(p) = self.data.person(id) {
+            self.db.send(Cmd::put(PEOPLE, &p.id, p, false));
+        }
+    }
+
+    fn save_clan(&self, id: &str) {
+        if let Some(c) = self.data.clan(id) {
+            self.db.send(Cmd::put(CLANS, &c.id, c, false));
+        }
+    }
+
+    fn save_link(&self, id: &str) {
+        if let Some(link) = self.data.links.iter().find(|link| link.id == id) {
+            self.db.send(Cmd::put(LINKS, &link.id, link, false));
+        }
+    }
+
+    fn flush_dirty(&mut self) {
+        if let Some(id) = self.dirty.take() {
+            self.save_person(&id);
+            if let Some(p) = self.data.person(&id) {
+                notes::refresh_preamble(&self.cfg.project, p);
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // update
+    // -----------------------------------------------------------------------
+
+    pub fn update(&mut self, message: Message) -> Task<Message> {
+        let redraw = !matches!(message, Message::Tick | Message::Search(_));
+        // camera-only messages never move cards or change lines
+        let geometry = redraw
+            && !matches!(
+                message,
+                Message::ZoomAt(..)
+                    | Message::PanBy(_)
+                    | Message::FitToWindow
+                    | Message::WindowResized(_)
+            );
+        let task = self.handle(message);
+        if geometry {
+            // incremental: only lines near moved cards or with edited inputs are re-routed
+            self.routes.sync(&self.data);
+        }
+        if redraw {
+            self.cache.clear();
+        }
+        task
+    }
+
+    fn handle(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::Tool(tool) => {
+                self.flush_dirty();
+                self.close_note();
+                self.tool = tool;
+                self.pending_link = None;
+                self.notice = (tool == Tool::Clan && self.active_clan.is_none()).then(|| {
+                    t("Select a clan in the sidebar, then click people to add/remove them.").into()
+                });
+            }
+            Message::AutoLayout => {
+                self.flush_dirty();
+                layout::auto_layout(&mut self.data);
+                self.selected_link_vertex = None;
+                let mut cmds: Vec<Cmd> = self
+                    .data
+                    .people
+                    .iter()
+                    .map(|p| Cmd::put(PEOPLE, &p.id, p, false))
+                    .collect();
+                for link in &mut self.data.links {
+                    if !link.route.is_empty()
+                        || link.start_port.is_some()
+                        || link.end_port.is_some()
+                    {
+                        link.route.clear();
+                        link.start_port = None;
+                        link.end_port = None;
+                        cmds.push(Cmd::put(LINKS, &link.id, link, false));
+                    }
+                }
+                self.db.send(Cmd::Batch(cmds));
+                self.rebuild_all();
+                self.fit_all();
+            }
+            Message::FitToWindow => self.fit_all(),
+            Message::Search(query) => self.search = query,
+            Message::SearchSubmit => {
+                let q = self.search.trim().to_lowercase();
+                if let Some(id) = self
+                    .data
+                    .people
+                    .iter()
+                    .find(|p| !q.is_empty() && p.name.to_lowercase().contains(&q))
+                    .map(|p| p.id.clone())
+                {
+                    self.flush_dirty();
+                    self.selected = Some(id.clone());
+                    self.selected_link = None;
+                    self.show_clan = false;
+                    self.focus(&id);
+                }
+            }
+
+            Message::SelectPerson(id) => {
+                if id != self.selected {
+                    self.flush_dirty();
+                    self.close_note();
+                }
+                self.selected = id;
+                self.selected_link = None;
+                self.selected_link_vertex = None;
+                self.show_clan = false;
+            }
+            Message::SelectLink(id) => {
+                self.flush_dirty();
+                self.close_note();
+                self.selected = None;
+                self.selected_link = Some(id);
+                self.selected_link_vertex = None;
+                self.show_clan = false;
+            }
+            Message::SelectLinkVertex(id, vertex, route) => {
+                self.flush_dirty();
+                self.selected = None;
+                self.selected_link = Some(id.clone());
+                self.selected_link_vertex = Some(vertex);
+                self.show_clan = false;
+                if let Some(link) = self.data.links.iter_mut().find(|link| link.id == id) {
+                    link.route = route;
+                }
+            }
+            Message::FocusPerson(id) => {
+                self.flush_dirty();
+                self.close_note();
+                self.selected = Some(id.clone());
+                self.selected_link = None;
+                self.show_clan = false;
+                self.focus(&id);
+            }
+            Message::SelectClan(id) => {
+                self.flush_dirty();
+                self.close_note();
+                self.active_clan = Some(id);
+                self.show_clan = true;
+                self.selected = None;
+                self.selected_link = None;
+                self.notice = None;
+            }
+            Message::NewClan => {
+                let n = self.data.clans.len();
+                let clan = Clan {
+                    id: new_id(),
+                    name: tf("Clan {}", &[&(n + 1)]),
+                    color: PALETTE[n % PALETTE.len()],
+                    label_offset: [0.0, 0.0],
+                };
+                self.db.send(Cmd::put(CLANS, &clan.id, &clan, true));
+                self.active_clan = Some(clan.id.clone());
+                self.show_clan = true;
+                self.selected = None;
+                self.selected_link = None;
+                self.data.clans.push(clan);
+                self.data.reindex_clans();
+            }
+
+            Message::RenameClan(name) => {
+                if let Some(id) = self.active_clan.clone()
+                    && let Some(c) = self.data.clan_mut(&id)
+                {
+                    c.name = name;
+                    self.save_clan(&id);
+                }
+            }
+            Message::CycleClanColor => {
+                if let Some(id) = self.active_clan.clone()
+                    && let Some(c) = self.data.clan_mut(&id)
+                {
+                    let next = PALETTE
+                        .iter()
+                        .position(|p| *p == c.color)
+                        .map_or(0, |i| (i + 1) % PALETTE.len());
+                    c.color = PALETTE[next];
+                    self.save_clan(&id);
+                }
+            }
+            Message::FitClan => {
+                let bbox = self
+                    .active_clan
+                    .as_ref()
+                    .and_then(|id| self.hulls.get(id))
+                    .map(|h| h.bbox);
+                if let Some(bbox) = bbox {
+                    self.camera.fit(bbox, self.canvas_size);
+                }
+            }
+            Message::DeleteClan => {
+                if let Some(id) = self.active_clan.take() {
+                    let mut cmds = vec![Cmd::del(CLANS, &id)];
+                    for p in self
+                        .data
+                        .people
+                        .iter_mut()
+                        .filter(|p| p.clans.contains(&id))
+                    {
+                        p.clans.retain(|c| *c != id);
+                        cmds.push(Cmd::put(PEOPLE, &p.id, &*p, false));
+                    }
+                    self.db.send(Cmd::Batch(cmds));
+                    self.forget_note(NoteKey::Clan(id.clone()));
+                    self.data.clans.retain(|c| c.id != id);
+                    self.data.reindex_clans();
+                    self.hulls.remove(&id);
+                    self.recount();
+                    self.show_clan = false;
+                    if self.tool == Tool::Clan {
+                        self.tool = Tool::Select;
+                    }
+                }
+            }
+
+            Message::ZoomAt(anchor, factor) => self.camera.zoom_at(anchor, factor),
+            Message::PanBy(delta) => self.camera.pan_screen(delta),
+            Message::NodeDragged(id, to) => {
+                if let Some(&i) = self.data.person_idx.get(&id) {
+                    let p = &mut self.data.people[i];
+                    let from = Point::new(p.x, p.y);
+                    p.x = to.x;
+                    p.y = to.y;
+                    let clans = p.clans.clone();
+                    self.grid.move_item(i as u32, from, to);
+                    self.rebuild_hulls_for(&clans);
+                }
+            }
+            Message::NodeDropped(id) => {
+                self.save_person(&id);
+                for link in self
+                    .data
+                    .links
+                    .iter()
+                    .filter(|link| link.from == id || link.to == id)
+                {
+                    self.db.send(Cmd::put(LINKS, &link.id, link, false));
+                }
+            }
+            Message::LinkRouteDragged(id, route, label_position, start_port, end_port) => {
+                if let Some(link) = self.data.links.iter_mut().find(|link| link.id == id) {
+                    link.route = route;
+                    link.start_port = Some(start_port);
+                    link.end_port = Some(end_port);
+                    if label_position.is_some() {
+                        link.label_position = label_position;
+                    }
+                }
+            }
+            Message::LinkLabelDragged(id, position) => {
+                if let Some(link) = self.data.links.iter_mut().find(|link| link.id == id) {
+                    link.label_position = Some(position);
+                }
+            }
+            Message::LinkDropped(id) => self.save_link(&id),
+            Message::DeleteLinkVertex(id, vertex) => {
+                if let Some(link) = self.data.links.iter_mut().find(|link| link.id == id)
+                    && vertex < link.route.len()
+                {
+                    link.route.remove(vertex);
+                    if link.route.is_empty() {
+                        link.start_port = None;
+                        link.end_port = None;
+                    }
+                    link.label_position = None;
+                    self.selected_link_vertex = None;
+                    self.save_link(&id);
+                }
+            }
+            Message::ResetLinkRoute(id) => {
+                if let Some(link) = self.data.links.iter_mut().find(|link| link.id == id) {
+                    link.route.clear();
+                    link.start_port = None;
+                    link.end_port = None;
+                    link.label_position = None;
+                    self.selected_link_vertex = None;
+                    self.save_link(&id);
+                }
+            }
+            Message::ClanLabelDragged(id, offset) => {
+                if let Some(clan) = self.data.clan_mut(&id) {
+                    clan.label_offset = offset;
+                }
+            }
+            Message::ClanLabelDropped(id) => self.save_clan(&id),
+            Message::AddPersonAt(world) => {
+                self.flush_dirty();
+                let person = Person {
+                    id: new_id(),
+                    name: t("New person").into(),
+                    born: String::new(),
+                    died: String::new(),
+                    x: world.x - NODE_W / 2.0,
+                    y: world.y - NODE_H / 2.0,
+                    clans: self.active_clan.iter().cloned().collect(),
+                };
+                self.db.send(Cmd::put(PEOPLE, &person.id, &person, true));
+                let id = person.id.clone();
+                let clans = person.clans.clone();
+                let i = self.data.push_person(person);
+                self.grid.insert(
+                    i as u32,
+                    Point::new(world.x - NODE_W / 2.0, world.y - NODE_H / 2.0),
+                );
+                self.rebuild_hulls_for(&clans);
+                self.recount();
+                self.selected = Some(id);
+                self.show_clan = false;
+                self.tool = Tool::Select;
+            }
+            Message::ToggleClan(person_id) => {
+                if let Some(clan_id) = self.active_clan.clone()
+                    && let Some(p) = self.data.person_mut(&person_id)
+                {
+                    if let Some(pos) = p.clans.iter().position(|c| *c == clan_id) {
+                        p.clans.remove(pos);
+                    } else {
+                        p.clans.push(clan_id.clone());
+                    }
+                    self.save_person(&person_id);
+                    self.rebuild_hulls_for(&[clan_id]);
+                    self.recount();
+                }
+            }
+            Message::ConnectRequested(from, to) => {
+                self.flush_dirty();
+                self.pending_link = Some(PendingLink {
+                    from,
+                    to,
+                    label: String::new(),
+                });
+            }
+
+            Message::LinkLabel(label) => {
+                if let Some(pl) = &mut self.pending_link {
+                    pl.label = label;
+                }
+            }
+            Message::LinkPreset(label) => {
+                if let Some(pl) = &mut self.pending_link {
+                    pl.label = label.to_string();
+                }
+                return Task::done(Message::ConfirmLink);
+            }
+            Message::ConfirmLink => {
+                if let Some(pl) = self.pending_link.take() {
+                    let label = pl.label.trim();
+                    let link = Link {
+                        id: new_id(),
+                        from: pl.from,
+                        to: pl.to,
+                        label: if label.is_empty() {
+                            "related to".into()
+                        } else {
+                            label.to_string()
+                        },
+                        route: Vec::new(),
+                        label_position: None,
+                        start_port: None,
+                        end_port: None,
+                    };
+                    self.db.send(Cmd::put(LINKS, &link.id, &link, true));
+                    self.data.links.push(link);
+                    if self.tool == Tool::Connect {
+                        self.tool = Tool::Select;
+                    }
+                }
+            }
+            Message::CancelLink => self.pending_link = None,
+            Message::DeleteLink(id) => {
+                self.data.links.retain(|l| l.id != id);
+                self.db.send(Cmd::del(LINKS, &id));
+                if self.selected_link.as_deref() == Some(id.as_str()) {
+                    self.selected_link = None;
+                    self.selected_link_vertex = None;
+                }
+            }
+
+            Message::EditName(v) => self.edit_selected(|p| p.name = v),
+            Message::EditBorn(v) => self.edit_selected(|p| p.born = v),
+            Message::EditDied(v) => self.edit_selected(|p| p.died = v),
+            Message::CommitPerson => self.flush_dirty(),
+            Message::DeletePerson => {
+                if let Some(id) = self.selected.take() {
+                    self.delete_person(&id);
+                }
+            }
+            Message::DeleteKey => {
+                if let (Some(id), Some(vertex)) =
+                    (self.selected_link.clone(), self.selected_link_vertex.take())
+                {
+                    if let Some(link) = self.data.links.iter_mut().find(|link| link.id == id)
+                        && vertex < link.route.len()
+                    {
+                        link.route.remove(vertex);
+                        if link.route.is_empty() {
+                            link.start_port = None;
+                            link.end_port = None;
+                        }
+                        link.label_position = None;
+                        self.save_link(&id);
+                    }
+                } else if let Some(id) = self.selected_link.take() {
+                    self.data.links.retain(|link| link.id != id);
+                    self.db.send(Cmd::del(LINKS, &id));
+                } else if let Some(id) = self.selected.take() {
+                    self.delete_person(&id);
+                }
+            }
+            Message::AddToClan(choice) => {
+                if let Some(id) = self.selected.clone()
+                    && let Some(p) = self.data.person_mut(&id)
+                    && !p.clans.contains(&choice.id)
+                {
+                    p.clans.push(choice.id.clone());
+                    self.save_person(&id);
+                    self.rebuild_hulls_for(&[choice.id]);
+                    self.recount();
+                }
+            }
+            Message::RemoveFromClan(clan_id) => {
+                if let Some(id) = self.selected.clone()
+                    && let Some(p) = self.data.person_mut(&id)
+                {
+                    p.clans.retain(|c| *c != clan_id);
+                    self.save_person(&id);
+                    self.rebuild_hulls_for(&[clan_id]);
+                    self.recount();
+                }
+            }
+
+            Message::ChooseFiles => {
+                if self.selected.is_some() {
+                    return Task::perform(
+                        async {
+                            rfd::AsyncFileDialog::new()
+                                .set_title(t("Attach files"))
+                                .pick_files()
+                                .await
+                                .map(|handles| {
+                                    handles
+                                        .iter()
+                                        .map(|h| h.path().to_path_buf())
+                                        .collect::<Vec<PathBuf>>()
+                                })
+                                .unwrap_or_default()
+                        },
+                        Message::FilesChosen,
+                    );
+                }
+                self.notice = Some(t("Select a person first.").into());
+            }
+            Message::FileDropped(path) => return self.import_files(vec![path]),
+            Message::FilesChosen(paths) => return self.import_files(paths),
+            Message::FilesImported(result) => match result {
+                Ok(recs) => {
+                    for rec in recs {
+                        self.db.send(Cmd::put(FILES, &rec.id, &rec, true));
+                        self.data.files.push(rec);
+                    }
+                    self.refresh_file_marks();
+                }
+                Err(e) => self.notice = Some(e),
+            },
+            Message::OpenFile(id) => {
+                if let Some(rec) = self.data.files.iter().find(|f| f.id == id)
+                    && let Err(e) = files::open(&files::absolute(&self.cfg.project, rec))
+                {
+                    self.notice = Some(e);
+                }
+            }
+            Message::DeleteFile(id) => {
+                if let Some(pos) = self.data.files.iter().position(|f| f.id == id) {
+                    let rec = self.data.files.remove(pos);
+                    let _ = std::fs::remove_file(files::absolute(&self.cfg.project, &rec));
+                    self.db.send(Cmd::del(FILES, &rec.id));
+                    self.refresh_file_marks();
+                }
+            }
+
+            Message::WindowResized(size) => {
+                self.canvas_size = Size::new(
+                    (size.width - SIDEBAR_W - INSPECTOR_W).max(100.0),
+                    (size.height - TOOLBAR_H - STATUS_H).max(100.0),
+                );
+            }
+            Message::Escape => {
+                if self.pending_link.take().is_none() {
+                    if self.tool != Tool::Select {
+                        self.tool = Tool::Select;
+                    } else {
+                        self.flush_dirty();
+                        self.selected = None;
+                        self.selected_link = None;
+                        self.show_clan = false;
+                    }
+                }
+            }
+            Message::Tick => {
+                self.flush_dirty();
+                self.flush_note();
+            }
+            Message::OpenSettings(_) => {}
+
+            Message::OpenNote(key) => self.open_note(key),
+            Message::CloseNote => self.close_note(),
+            Message::NoteEditor(action) => {
+                if let Some(note) = &mut self.note {
+                    let output = note.editor.update(action);
+                    if output.events.contains(&EditorEvent::Changed) {
+                        note.dirty = true;
+                    }
+                    return output.task.map(Message::NoteEditor);
+                }
+            }
+            Message::NoteName(name) => {
+                if let Some(note) = &mut self.note {
+                    note.name = name;
+                }
+            }
+            Message::RenameNote => {
+                self.flush_note();
+                if let Some(note) = &mut self.note {
+                    match notes::rename_page(&self.cfg.project, &note.key, &note.name) {
+                        Ok(key) => {
+                            if let NoteKey::Page { page, .. } = &key {
+                                note.name = page.clone();
+                            }
+                            note.key = key;
+                            self.notice = None;
+                        }
+                        Err(e) => self.notice = Some(e),
+                    }
+                    self.books = notes::scan_books(&self.cfg.project);
+                }
+            }
+            Message::BookName(name) => {
+                if let Some(note) = &mut self.note {
+                    note.book_name = name;
+                }
+            }
+            Message::RenameBook => {
+                self.flush_note();
+                if let Some(note) = &mut self.note
+                    && let NoteKey::Page { book, page } = &note.key
+                {
+                    match notes::rename_book(&self.cfg.project, book, &note.book_name) {
+                        Ok(new_book) => {
+                            note.book_name = new_book.clone();
+                            note.key = NoteKey::Page {
+                                book: new_book,
+                                page: page.clone(),
+                            };
+                            self.notice = None;
+                        }
+                        Err(e) => self.notice = Some(e),
+                    }
+                    self.books = notes::scan_books(&self.cfg.project);
+                }
+            }
+            Message::DeleteNote => {
+                if let Some(note) = self.note.take() {
+                    notes::delete(&self.cfg.project, &note.key);
+                    self.books = notes::scan_books(&self.cfg.project);
+                }
+            }
+            Message::NewBook => {
+                self.close_note();
+                match notes::create_book(&self.cfg.project) {
+                    Ok(key) => {
+                        self.books = notes::scan_books(&self.cfg.project);
+                        self.open_note(key);
+                    }
+                    Err(e) => self.notice = Some(e),
+                }
+            }
+            Message::NewPage(book) => {
+                self.close_note();
+                match notes::create_page(&self.cfg.project, &book) {
+                    Ok(key) => {
+                        self.books = notes::scan_books(&self.cfg.project);
+                        self.open_note(key);
+                    }
+                    Err(e) => self.notice = Some(e),
+                }
+            }
+        }
+        Task::none()
+    }
+
+    fn flush_note(&mut self) {
+        if let Some(note) = &mut self.note
+            && note.dirty
+        {
+            let path = note.key.path(&self.cfg.project);
+            let markdown = note.editor.markdown();
+            let result = match &note.key {
+                NoteKey::Page { .. } => notes::save(&path, &markdown),
+                // empty person / clan notes leave no file behind
+                key if markdown.trim().is_empty() => {
+                    notes::delete(&self.cfg.project, key);
+                    Ok(())
+                }
+                NoteKey::Person(id) => match self.data.person(id) {
+                    Some(p) => notes::save(&path, &notes::with_preamble(p, &markdown)),
+                    None => notes::save(&path, &markdown),
+                },
+                NoteKey::Clan(_) => notes::save(&path, &markdown),
+            };
+            match result {
+                Ok(()) => {
+                    note.dirty = false;
+                    let id = match &note.key {
+                        NoteKey::Person(id) | NoteKey::Clan(id) => Some(id.clone()),
+                        NoteKey::Page { .. } => None,
+                    };
+                    if let Some(id) = id {
+                        let changed = if markdown.trim().is_empty() {
+                            self.with_notes.remove(&id)
+                        } else {
+                            self.with_notes.insert(id)
+                        };
+                        if changed {
+                            self.cache.clear();
+                        }
+                    }
+                }
+                Err(e) => self.notice = Some(e),
+            }
+        }
+    }
+
+    fn refresh_file_marks(&mut self) {
+        self.with_files = self.data.files.iter().map(|f| f.person.clone()).collect();
+    }
+
+    fn close_note(&mut self) {
+        self.flush_note();
+        self.note = None;
+    }
+
+    fn open_note(&mut self, key: NoteKey) {
+        self.close_note();
+        let text = notes::load(&self.cfg.project, &key);
+        let (book_name, name) = match &key {
+            NoteKey::Page { book, page } => (book.clone(), page.clone()),
+            _ => (String::new(), String::new()),
+        };
+        self.note = Some(OpenNote {
+            editor: EditorState::with_markdown(&text)
+                .paper(Paper::fill())
+                .style(ui::editor_style())
+                .zoom_settings(ZoomSettings::disabled())
+                .tab_width(2),
+            key,
+            name,
+            book_name,
+            dirty: false,
+        });
+        self.selected_link = None;
+        self.pending_link = None;
+    }
+
+    fn note_title(&self, key: &NoteKey) -> String {
+        match key {
+            NoteKey::Person(id) => self
+                .data
+                .person(id)
+                .map_or_else(|| t("Person").into(), |p| p.name.clone()),
+            NoteKey::Clan(id) => self
+                .data
+                .clan(id)
+                .map_or_else(|| t("Clan").into(), |c| c.name.clone()),
+            NoteKey::Page { book, .. } => book.clone(),
+        }
+    }
+
+    /// Drops the note of a deleted person / clan (and the open editor if it shows it).
+    fn forget_note(&mut self, key: NoteKey) {
+        if self.note.as_ref().is_some_and(|n| n.key == key) {
+            self.note = None;
+        }
+        notes::delete(&self.cfg.project, &key);
+        if let NoteKey::Person(id) | NoteKey::Clan(id) = &key {
+            self.with_notes.remove(id);
+        }
+    }
+
+    fn edit_selected(&mut self, edit: impl FnOnce(&mut Person)) {
+        if let Some(id) = self.selected.clone()
+            && let Some(p) = self.data.person_mut(&id)
+        {
+            edit(p);
+            self.dirty = Some(id);
+        }
+    }
+
+    fn delete_person(&mut self, id: &str) {
+        if self.dirty.as_deref() == Some(id) {
+            self.dirty = None;
+        }
+        let Some(person) = self.data.remove_person(id) else {
+            return;
+        };
+        if self.selected_link.as_ref().is_some_and(|link_id| {
+            self.data
+                .links
+                .iter()
+                .any(|link| link.id == *link_id && (link.from == id || link.to == id))
+        }) {
+            self.selected_link = None;
+        }
+        let mut cmds = vec![Cmd::del(PEOPLE, id)];
+
+        self.data.links.retain(|l| {
+            let keep = l.from != id && l.to != id;
+            if !keep {
+                cmds.push(Cmd::del(LINKS, &l.id));
+            }
+            keep
+        });
+
+        let project = self.cfg.project.clone();
+        self.data.files.retain(|f| {
+            let keep = f.person != id;
+            if !keep {
+                let _ = std::fs::remove_file(files::absolute(&project, f));
+                cmds.push(Cmd::del(FILES, &f.id));
+            }
+            keep
+        });
+        let _ = std::fs::remove_dir(files::person_dir(&project, id));
+        self.forget_note(NoteKey::Person(id.to_owned()));
+        self.refresh_file_marks();
+
+        self.db.send(Cmd::Batch(cmds));
+        if self
+            .pending_link
+            .as_ref()
+            .is_some_and(|pl| pl.from == id || pl.to == id)
+        {
+            self.pending_link = None;
+        }
+        // indices changed (swap_remove) -> rebuild grid; hulls only for affected clans
+        self.grid = Grid::build(&self.data.people);
+        self.rebuild_hulls_for(&person.clans);
+        self.recount();
+    }
+
+    fn import_files(&mut self, paths: Vec<PathBuf>) -> Task<Message> {
+        let Some(person) = self.selected.clone() else {
+            self.notice = Some(t("Select a person, then drop files to attach them.").into());
+            return Task::none();
+        };
+        if paths.is_empty() {
+            return Task::none();
+        }
+        let project = self.cfg.project.clone();
+        Task::perform(
+            async move { files::import(&project, &person, &paths) },
+            Message::FilesImported,
+        )
+    }
+
+    // -----------------------------------------------------------------------
+    // view
+    // -----------------------------------------------------------------------
+
+    pub fn view(&self) -> Element<'_, Message> {
+        let body = row![
+            self.view_sidebar(),
+            vline(),
+            self.view_centre(),
+            vline(),
+            self.view_inspector(),
+        ]
+        .height(Length::Fill);
+
+        column![
+            self.view_toolbar(),
+            hline(),
+            body,
+            hline(),
+            self.view_status()
+        ]
+        .into()
+    }
+
+    fn view_centre(&self) -> Element<'_, Message> {
+        let Some(note) = &self.note else {
+            return canvas(Board { app: self })
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into();
+        };
+
+        let mut header = row![
+            button(text(t("← Board")).size(13))
+                .padding([6, 12])
+                .style(ui::tool(false))
+                .on_press(Message::CloseNote),
+        ]
+        .spacing(8)
+        .align_y(alignment::Vertical::Center);
+
+        if matches!(note.key, NoteKey::Page { .. }) {
+            header = header
+                .push(
+                    text_input(t("Book name"), &note.book_name)
+                        .on_input(Message::BookName)
+                        .on_submit(Message::RenameBook)
+                        .size(14)
+                        .padding(6)
+                        .width(Length::Fixed(200.0)),
+                )
+                .push(text("/").size(14).color(ui::MUTED))
+                .push(
+                    text_input(t("Page name"), &note.name)
+                        .on_input(Message::NoteName)
+                        .on_submit(Message::RenameNote)
+                        .size(14)
+                        .padding(6)
+                        .width(Length::Fixed(260.0)),
+                )
+                .push(
+                    button(text(t("Delete page")).size(13))
+                        .padding([6, 12])
+                        .style(ui::danger)
+                        .on_press(Message::DeleteNote),
+                );
+        } else {
+            header = header.push(
+                text(tf("Notes · {}", &[&self.note_title(&note.key)]))
+                    .size(15)
+                    .font(Font {
+                        weight: Weight::Bold,
+                        ..Font::default()
+                    }),
+            );
+        }
+
+        column![
+            container(header.padding([8, 12]))
+                .width(Length::Fill)
+                .style(ui::panel),
+            hline(),
+            markdown_editor(&note.editor)
+                .status_bar(false)
+                .view()
+                .map(Message::NoteEditor),
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    }
+
+    /// Small "N" (has notes) / "F" (has files) markers for list rows.
+    fn marks(&self, id: &str, files: bool) -> Element<'_, Message> {
+        let mut r = Row::new().spacing(4);
+        if self.with_notes.contains(id) {
+            r = r.push(text(t("N")).size(11).color(ui::NOTE_MARK));
+        }
+        if files && self.with_files.contains(id) {
+            r = r.push(text(t("F")).size(11).color(ui::FILE_MARK));
+        }
+        r.into()
+    }
+
+    fn view_toolbar(&self) -> Element<'_, Message> {
+        let tool = |label: &'static str, t: Tool| {
+            button(text(label).size(13))
+                .padding([6, 12])
+                .style(ui::tool(self.tool == t))
+                .on_press(Message::Tool(t))
+        };
+        let action = |label: &'static str, msg: Message| {
+            button(text(label).size(13))
+                .padding([6, 12])
+                .style(ui::tool(false))
+                .on_press(msg)
+        };
+
+        let tools = row![
+            tool(t("Select"), Tool::Select),
+            tool(t("+ Person"), Tool::AddPerson),
+            tool(t("Connect"), Tool::Connect),
+            tool(t("Clan"), Tool::Clan),
+            text("|").size(16).color(ui::BORDER),
+            action(t("Auto-layout"), Message::AutoLayout),
+            action(t("Fit to window"), Message::FitToWindow),
+        ]
+        .spacing(6)
+        .align_y(alignment::Vertical::Center);
+
+        let search = text_input(t("Search people…"), &self.search)
+            .on_input(Message::Search)
+            .on_submit(Message::SearchSubmit)
+            .size(13)
+            .padding(6)
+            .width(Length::Fixed(260.0));
+
+        let workspace = button(text(format!("▤ {}", self.workspace_name())).size(13))
+            .padding([6, 12])
+            .style(ui::tool(false))
+            .on_press(Message::OpenSettings(SettingsPage::Workspace));
+        let settings = button(text(t("Settings")).size(13))
+            .padding([6, 12])
+            .style(ui::tool(false))
+            .on_press(Message::OpenSettings(SettingsPage::General));
+
+        container(
+            row![
+                container(tools).width(Length::Fill),
+                search,
+                workspace,
+                settings
+            ]
+            .spacing(8)
+            .align_y(alignment::Vertical::Center)
+            .padding([8, 12]),
+        )
+        .width(Length::Fill)
+        .height(Length::Fixed(TOOLBAR_H))
+        .style(ui::panel)
+        .into()
+    }
+
+    fn view_sidebar(&self) -> Element<'_, Message> {
+        let mut clans = Column::new().spacing(2);
+        for clan in &self.data.clans {
+            let count = self.clan_counts.get(&clan.id).copied().unwrap_or(0);
+            let active = self.active_clan.as_deref() == Some(clan.id.as_str());
+            let content = row![
+                container(text(""))
+                    .width(Length::Fixed(10.0))
+                    .height(Length::Fixed(10.0))
+                    .style(ui::swatch(clan.color())),
+                text(clan.name.as_str()).size(13).width(Length::Fill),
+                self.marks(&clan.id, false),
+                text(count.to_string()).size(12).color(ui::MUTED),
+            ]
+            .spacing(8)
+            .align_y(alignment::Vertical::Center);
+            clans = clans.push(
+                button(content)
+                    .width(Length::Fill)
+                    .padding([4, 8])
+                    .style(ui::list_item(active))
+                    .on_press(Message::SelectClan(clan.id.clone())),
+            );
+        }
+        clans = clans.push(
+            button(text(t("+ New clan")).size(13))
+                .padding([4, 8])
+                .style(ui::link)
+                .on_press(Message::NewClan),
+        );
+
+        let mut books = Column::new().spacing(2);
+        for book in &self.books {
+            books = books.push(
+                row![
+                    text(book.name.as_str()).size(13).width(Length::Fill),
+                    button(text(t("+ page")).size(12))
+                        .padding([2, 6])
+                        .style(ui::ghost)
+                        .on_press(Message::NewPage(book.name.clone())),
+                ]
+                .padding([2, 8])
+                .align_y(alignment::Vertical::Center),
+            );
+            for page in &book.pages {
+                let key = NoteKey::Page {
+                    book: book.name.clone(),
+                    page: page.clone(),
+                };
+                let active = self.note.as_ref().is_some_and(|n| n.key == key);
+                books = books.push(
+                    button(text(page.as_str()).size(13))
+                        .width(Length::Fill)
+                        .padding([3, 20])
+                        .style(ui::list_item(active))
+                        .on_press(Message::OpenNote(key)),
+                );
+            }
+        }
+        books = books.push(
+            button(text(t("+ New book")).size(13))
+                .padding([4, 8])
+                .style(ui::link)
+                .on_press(Message::NewBook),
+        );
+
+        let q = self.search.trim().to_lowercase();
+        let mut people = Column::new().spacing(2);
+        let mut total = 0usize;
+        for p in &self.data.people {
+            if !q.is_empty() && !p.name.to_lowercase().contains(&q) {
+                continue;
+            }
+            total += 1;
+            if total <= MAX_PEOPLE_LIST {
+                let active = self.selected.as_deref() == Some(p.id.as_str());
+                people = people.push(
+                    button(
+                        row![
+                            text(p.name.as_str()).size(13).width(Length::Fill),
+                            self.marks(&p.id, true),
+                        ]
+                        .align_y(alignment::Vertical::Center),
+                    )
+                        .width(Length::Fill)
+                        .padding([4, 8])
+                        .style(ui::list_item(active))
+                        .on_press(Message::FocusPerson(p.id.clone())),
+                );
+            }
+        }
+        if total > MAX_PEOPLE_LIST {
+            people = people.push(
+                text(tf("… {} more - use search", &[&(total - MAX_PEOPLE_LIST)]))
+                    .size(12)
+                    .color(ui::MUTED),
+            );
+        }
+
+        container(
+            column![
+                section(t("CLANS")),
+                scrollable(clans).height(Length::FillPortion(1)),
+                section(t("PEOPLE")),
+                scrollable(people).height(Length::FillPortion(2)),
+                section(t("BOOKS")),
+                scrollable(books).height(Length::FillPortion(1)),
+            ]
+            .spacing(8),
+        )
+        .padding(12)
+        .width(Length::Fixed(SIDEBAR_W))
+        .height(Length::Fill)
+        .style(ui::panel)
+        .into()
+    }
+
+    fn view_inspector(&self) -> Element<'_, Message> {
+        let content: Element<'_, Message> = if let Some(pl) = &self.pending_link {
+            self.view_pending_link(pl)
+        } else if let Some(link) = self
+            .selected_link
+            .as_deref()
+            .and_then(|id| self.data.links.iter().find(|link| link.id == id))
+        {
+            self.view_link(link)
+        } else if let Some(p) = self.selected_person() {
+            self.view_person(p)
+        } else if self.show_clan
+            && let Some(c) = self
+                .active_clan
+                .as_deref()
+                .and_then(|id| self.data.clan(id))
+        {
+            self.view_clan(c)
+        } else {
+            column![
+                section(t("WURZELWERK")),
+                hint(t("Click a person to edit details, clans, lines and files.")),
+                hint(t("+ Person: click on the board to place someone.")),
+                hint(t("Connect: drag from a person (or a handle of the selected person) onto another person, then name the line.")),
+                hint(t("Select: drag a line label to move it, or drag a line segment to add/move a bend.")),
+                hint(t("Clan: pick a clan on the left, then click people to add or remove them.")),
+                hint(t("Wheel = zoom · drag empty space / right mouse = pan · select a line then Delete to remove it, or select a person to delete them.")),
+            ]
+            .spacing(10)
+            .into()
+        };
+
+        container(scrollable(container(content).padding(16)).height(Length::Fill))
+            .width(Length::Fixed(INSPECTOR_W))
+            .height(Length::Fill)
+            .style(ui::panel)
+            .into()
+    }
+
+    fn view_pending_link(&self, pl: &PendingLink) -> Element<'_, Message> {
+        let name = |id: &str| {
+            self.data
+                .person(id)
+                .map(|p| p.name.clone())
+                .unwrap_or_default()
+        };
+        let presets = Row::with_children(LINK_PRESETS.iter().map(|&label| {
+            button(text(label).size(12))
+                .padding([3, 10])
+                .style(ui::card)
+                .on_press(Message::LinkPreset(label))
+                .into()
+        }))
+        .spacing(6)
+        .wrap();
+
+        column![
+            section(t("NAME THE LINE")),
+            text(format!("{} → {}", name(&pl.from), name(&pl.to))).size(14),
+            text_input(t("e.g. godfather of"), &pl.label)
+                .on_input(Message::LinkLabel)
+                .on_submit(Message::ConfirmLink)
+                .padding(6)
+                .size(13),
+            presets,
+            row![
+                button(text(t("Create line")).size(13))
+                    .style(ui::tool(true))
+                    .padding([6, 12])
+                    .on_press(Message::ConfirmLink),
+                button(text(t("Cancel")).size(13))
+                    .style(ui::tool(false))
+                    .padding([6, 12])
+                    .on_press(Message::CancelLink),
+            ]
+            .spacing(8),
+        ]
+        .spacing(10)
+        .into()
+    }
+
+    fn view_link(&self, link: &Link) -> Element<'_, Message> {
+        let from = self
+            .data
+            .person(&link.from)
+            .map(|person| person.name.clone())
+            .unwrap_or_else(|| t("Missing person").into());
+        let to = self
+            .data
+            .person(&link.to)
+            .map(|person| person.name.clone())
+            .unwrap_or_else(|| t("Missing person").into());
+        let mut controls = Column::new().spacing(10).push(section(t("SELECTED LINE")));
+        controls = controls
+            .push(text(format!("{from}  →  {to}")).size(14))
+            .push(text(link.label.clone()).size(13).color(ui::MUTED))
+            .push(hint(t("Drag a label to move it or drag a segment to reshape the route.")));
+        if let Some(vertex) = self.selected_link_vertex {
+            controls = controls
+                .push(hint(t("Selected corner: press Delete or remove it below.")))
+                .push(
+                    button(text(t("Remove selected corner")).size(13))
+                        .padding([6, 12])
+                        .style(ui::tool(false))
+                        .on_press(Message::DeleteLinkVertex(link.id.clone(), vertex)),
+                );
+        } else {
+            controls = controls.push(hint(t("Click a route corner to select and remove it.")));
+        }
+        if !link.route.is_empty() {
+            controls = controls.push(
+                button(text(t("Reset to automatic route")).size(13))
+                    .padding([6, 12])
+                    .style(ui::tool(false))
+                    .on_press(Message::ResetLinkRoute(link.id.clone())),
+            );
+        }
+        controls
+            .push(hint(t("Press Delete to remove this line.")))
+            .push(
+                button(text(t("Remove line")).size(13))
+                    .padding([6, 12])
+                    .style(ui::danger)
+                    .on_press(Message::DeleteLink(link.id.clone())),
+            )
+            .into()
+    }
+
+    fn view_person<'a>(&'a self, p: &'a Person) -> Element<'a, Message> {
+        let bold = Font {
+            weight: Weight::Bold,
+            ..Font::DEFAULT
+        };
+
+        // clans
+        let mut chips: Vec<Element<'a, Message>> = p
+            .clans
+            .iter()
+            .filter_map(|cid| self.data.clan(cid))
+            .map(|c| {
+                button(text(format!("{}  ×", c.name)).size(12))
+                    .padding([3, 10])
+                    .style(ui::chip(c.color()))
+                    .on_press(Message::RemoveFromClan(c.id.clone()))
+                    .into()
+            })
+            .collect();
+        let choices: Vec<ClanChoice> = self
+            .data
+            .clans
+            .iter()
+            .filter(|c| !p.clans.contains(&c.id))
+            .map(|c| ClanChoice {
+                id: c.id.clone(),
+                name: c.name.clone(),
+            })
+            .collect();
+        if !choices.is_empty() {
+            chips.push(
+                pick_list(choices, None::<ClanChoice>, Message::AddToClan)
+                    .placeholder(t("+ clan"))
+                    .text_size(12)
+                    .padding([3, 8])
+                    .into(),
+            );
+        }
+
+        // lines
+        let mut lines = Column::new().spacing(4);
+        let mut line_count = 0usize;
+        for l in self
+            .data
+            .links
+            .iter()
+            .filter(|l| l.from == p.id || l.to == p.id)
+        {
+            line_count += 1;
+            if line_count > MAX_LINES_LIST {
+                continue;
+            }
+            let undirected = link_style(&l.label) == LinkStyle::Undirected;
+            let (arrow, other) = if l.from == p.id {
+                (if undirected { "↔" } else { "→" }, &l.to)
+            } else {
+                (if undirected { "↔" } else { "←" }, &l.from)
+            };
+            let other_name = self
+                .data
+                .person(other)
+                .map(|o| o.name.as_str())
+                .unwrap_or("?");
+            lines = lines.push(
+                row![
+                    text(arrow).size(13).color(ui::MUTED),
+                    button(text(other_name).size(13))
+                        .padding(0)
+                        .style(ui::link)
+                        .on_press(Message::FocusPerson(other.clone())),
+                    text(format!("· {}", l.label))
+                        .size(12)
+                        .color(ui::MUTED)
+                        .width(Length::Fill),
+                    button(text("✕").size(11))
+                        .padding([0, 4])
+                        .style(ui::ghost)
+                        .on_press(Message::DeleteLink(l.id.clone())),
+                ]
+                .spacing(6)
+                .align_y(alignment::Vertical::Center),
+            );
+        }
+        if line_count > MAX_LINES_LIST {
+            lines = lines.push(
+                text(tf("… {} more", &[&(line_count - MAX_LINES_LIST)]))
+                    .size(12)
+                    .color(ui::MUTED),
+            );
+        }
+        if line_count == 0 {
+            lines = lines.push(hint(t("Drag a handle onto another person to add a line.")));
+        }
+
+        // files
+        let person_files: Vec<&FileRec> = self
+            .data
+            .files
+            .iter()
+            .filter(|f| f.person == p.id)
+            .collect();
+        let mut file_list = Column::new().spacing(6);
+        for f in &person_files {
+            file_list = file_list.push(
+                row![
+                    button(
+                        row![
+                            text(f.name.as_str()).size(13).width(Length::Fill),
+                            text(files::human_size(f.size)).size(12).color(ui::MUTED),
+                        ]
+                        .spacing(8)
+                    )
+                    .width(Length::Fill)
+                    .padding([6, 10])
+                    .style(ui::card)
+                    .on_press(Message::OpenFile(f.id.clone())),
+                    button(text("✕").size(11))
+                        .padding([0, 4])
+                        .style(ui::ghost)
+                        .on_press(Message::DeleteFile(f.id.clone())),
+                ]
+                .spacing(4)
+                .align_y(alignment::Vertical::Center),
+            );
+        }
+        let drop_zone = button(
+            container(text(t("Drop files here or choose…")).size(13))
+                .width(Length::Fill)
+                .align_x(alignment::Horizontal::Center)
+                .padding(18),
+        )
+        .width(Length::Fill)
+        .style(ui::drop_zone)
+        .on_press(Message::ChooseFiles);
+
+        column![
+            text_input(t("Name"), &p.name)
+                .on_input(Message::EditName)
+                .on_submit(Message::CommitPerson)
+                .font(bold)
+                .size(18)
+                .padding(6),
+            row![
+                text_input(t("born"), &p.born)
+                    .on_input(Message::EditBorn)
+                    .on_submit(Message::CommitPerson)
+                    .size(13)
+                    .padding(6),
+                text_input(t("died"), &p.died)
+                    .on_input(Message::EditDied)
+                    .on_submit(Message::CommitPerson)
+                    .size(13)
+                    .padding(6),
+            ]
+            .spacing(6),
+            section(t("CLANS")),
+            Row::with_children(chips).spacing(6).wrap(),
+            section(t("LINES")),
+            lines,
+            hint(t("On the board, drag a line label to reposition it or drag a segment to change the route.")),
+            button(text(t("Edit notes (markdown)")).size(13))
+                .padding([6, 12])
+                .style(ui::tool(false))
+                .on_press(Message::OpenNote(NoteKey::Person(p.id.clone()))),
+            section(tf("FILES · {}", &[&person_files.len()])),
+            file_list,
+            drop_zone,
+            button(text(t("Delete person")).size(13))
+                .padding([6, 12])
+                .style(ui::danger)
+                .on_press(Message::DeletePerson),
+        ]
+        .spacing(10)
+        .into()
+    }
+
+    fn view_clan<'a>(&'a self, c: &'a Clan) -> Element<'a, Message> {
+        let count = self.clan_counts.get(&c.id).copied().unwrap_or(0);
+        column![
+            section(t("CLAN")),
+            text_input(t("Clan name"), &c.name)
+                .on_input(Message::RenameClan)
+                .size(18)
+                .padding(6),
+            row![
+                container(text(""))
+                    .width(Length::Fixed(18.0))
+                    .height(Length::Fixed(18.0))
+                    .style(ui::swatch(c.color())),
+                button(text(t("Change colour")).size(13))
+                    .padding([4, 10])
+                    .style(ui::tool(false))
+                    .on_press(Message::CycleClanColor),
+            ]
+            .spacing(8)
+            .align_y(alignment::Vertical::Center),
+            text(tf("{} members", &[&count])).size(13).color(ui::MUTED),
+            button(text(t("Fit to clan")).size(13))
+                .padding([6, 12])
+                .style(ui::tool(false))
+                .on_press(Message::FitClan),
+            button(text(t("Edit notes (markdown)")).size(13))
+                .padding([6, 12])
+                .style(ui::tool(false))
+                .on_press(Message::OpenNote(NoteKey::Clan(c.id.clone()))),
+            hint(t("Use the Clan tool and click people on the board to add or remove them. A person can be in several clans.")),
+            button(text(t("Delete clan")).size(13))
+                .padding([6, 12])
+                .style(ui::danger)
+                .on_press(Message::DeleteClan),
+        ]
+        .spacing(10)
+        .into()
+    }
+
+    fn view_status(&self) -> Element<'_, Message> {
+        let pending = self.db.pending();
+        let save = if let Some(e) = self.db.last_error() {
+            tf("save error: {}", &[&e])
+        } else if pending > 0 || self.dirty.is_some() {
+            tf("saving… ({})", &[&pending])
+        } else {
+            t("all changes saved").into()
+        };
+        let left = tf(
+            "{} people · {} clans · {} lines · {}",
+            &[
+                &self.data.people.len(),
+                &self.data.clans.len(),
+                &self.data.links.len(),
+                &save,
+            ],
+        );
+        let right = match &self.notice {
+            Some(n) => format!("{n}   ·   {:.0}%", self.camera.zoom * 100.0),
+            None => format!("{:.0}%", self.camera.zoom * 100.0),
+        };
+
+        container(
+            row![
+                text(left).size(12).color(ui::MUTED).width(Length::Fill),
+                text(right).size(12).color(ui::MUTED),
+            ]
+            .padding([5, 12]),
+        )
+        .width(Length::Fill)
+        .height(Length::Fixed(STATUS_H))
+        .style(ui::panel)
+        .into()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// small view helpers
+// ---------------------------------------------------------------------------
+
+pub fn section<'a>(label: impl ToString) -> Text<'a> {
+    text(label.to_string())
+        .size(11)
+        .color(ui::MUTED)
+        .font(Font {
+            weight: Weight::Bold,
+            ..Font::DEFAULT
+        })
+}
+
+pub fn hint<'a>(label: &'a str) -> Text<'a> {
+    text(label).size(12).color(ui::MUTED)
+}
+
+pub fn hline<'a, M: 'a>() -> Element<'a, M> {
+    container(text(""))
+        .width(Length::Fill)
+        .height(Length::Fixed(1.0))
+        .style(ui::divider)
+        .into()
+}
+
+pub fn vline<'a, M: 'a>() -> Element<'a, M> {
+    container(text(""))
+        .width(Length::Fixed(1.0))
+        .height(Length::Fill)
+        .style(ui::divider)
+        .into()
+}

@@ -1,0 +1,2 @@
+[env]
+PROTOC = { value = "./bin/protoc.exe", force = true, relative = true }
