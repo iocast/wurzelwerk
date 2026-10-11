@@ -5,6 +5,11 @@ Format: Keep a Changelog (https://keepachangelog.com), versioning: Semantic Vers
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-11
+
+### Changed
+- Updates install themselves: a new version downloads in the background and installs with *Restart now* (Windows installer, macOS, AppImage); `.deb` and self-built copies still link to the release page
+
 ## [0.1.2] - 2026-10-11
 
 ### Fixed
@@ -32,7 +37,8 @@ Format: Keep a Changelog (https://keepachangelog.com), versioning: Semantic Vers
 - Update check against the latest GitHub release at start-up or via *Settings → Updates → Check now*; can be turned off
 - Large boards with 10 000 people stay smooth; `--demo RxC` generates such a board for load testing
 
-[unreleased]: https://github.com/iocast/wurzelwerk/compare/v0.1.2...HEAD
+[unreleased]: https://github.com/iocast/wurzelwerk/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/iocast/wurzelwerk/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/iocast/wurzelwerk/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/iocast/wurzelwerk/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/iocast/wurzelwerk/releases/tag/v0.1.0
