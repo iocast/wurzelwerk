@@ -1,0 +1,265 @@
+{% extends "base.html" %}
+
+{% block content %}
+{% set x = section.extra %}
+
+{# ── Hero: layered landscape, every layer scrolls at its own speed (data-speed) ── #}
+<section class="hero" data-hero>
+  <div class="hero__sky" data-speed="0.7" aria-hidden="true">
+    <div class="hero__sun"></div>
+  </div>
+
+  {# Floating person cards – the "leaves" of the family tree #}
+  <div class="float-cards" aria-hidden="true">
+    <div class="pcard" style="--c:#2F7A73; left:8%;  top:18%" data-speed="0.55"><b>Anna Weber</b><small>1931 – 2012</small></div>
+    <div class="pcard pcard--sm" style="--c:#A97323; left:20%; top:52%" data-speed="0.25"><b>Otto Brandt</b><small>1932 – 2019</small></div>
+    <div class="pcard" style="--c:#4B64A0; left:76%; top:16%" data-speed="0.6"><b>Clara Hofer</b><small>* 1949</small></div>
+    <div class="pcard pcard--lg" style="--c:#A84545; left:70%; top:56%" data-speed="-0.15"><b>Jonas Weber</b><small>* 1961</small></div>
+    <div class="pcard pcard--sm" style="--c:#8D5798; left:88%; top:38%" data-speed="0.4"><b>Ida Brandt</b><small>* 1935</small></div>
+    <div class="pcard pcard--sm" style="--c:#68883F; left:4%;  top:70%" data-speed="0.05"><b>Paul Keller</b><small>* 1988</small></div>
+  </div>
+
+  <div class="hero__title" data-speed="0.4" data-fade>
+    <img class="hero__logo" src="{{ get_url(path='logo.svg') }}" alt="" width="128" height="128">
+    <h1>Wurzelwerk</h1>
+    <p class="hero__sub">The board for families &amp; clans.</p>
+    <div class="hero__cta">
+      <a class="btn" href="{{ config.extra.releases }}">Download</a>
+      <a class="btn btn--ghost" href="{{ config.extra.repo }}">View source</a>
+    </div>
+  </div>
+
+  <svg class="hero__layer hero__layer--far" data-speed="0.45" viewBox="0 0 1440 400" preserveAspectRatio="none" aria-hidden="true">
+    <path d="M0 250 C180 190 320 225 480 205 C660 180 780 235 960 215 C1140 195 1300 160 1440 190 V400 H0Z"/>
+  </svg>
+  <svg class="hero__layer hero__layer--mid" data-speed="0.25" viewBox="0 0 1440 400" preserveAspectRatio="none" aria-hidden="true">
+    <path d="M0 295 C200 245 360 285 560 265 C760 245 900 305 1100 285 C1260 270 1360 245 1440 255 V400 H0Z"/>
+  </svg>
+  <svg class="hero__layer hero__layer--near" data-speed="0.1" viewBox="0 0 1440 400" preserveAspectRatio="none" aria-hidden="true">
+    <path d="M0 330 C160 300 300 320 470 312 C690 300 820 335 1010 322 C1180 310 1320 290 1440 300 V400 H0Z"/>
+  </svg>
+  <svg class="hero__layer hero__layer--ground" viewBox="0 0 1440 400" preserveAspectRatio="none" aria-hidden="true">
+    <path d="M0 360 C240 342 480 372 720 356 C960 340 1200 366 1440 350 V400 H0Z"/>
+  </svg>
+
+  <a class="hero__scroll" href="#roots" aria-label="Scroll down"><span></span></a>
+</section>
+
+{# ── Roots: the network grows while the section scrolls through the viewport (--grow) ── #}
+<section class="roots" id="roots" data-grow>
+  <div class="wrap roots__text reveal">
+    <p class="eyebrow">Wurzelwerk · <i>n.</i> root network</p>
+    <h2>{{ x.tagline }}</h2>
+    <p class="lead">{{ x.lead }}</p>
+  </div>
+
+  <svg class="roots__svg" viewBox="0 0 1200 600" aria-hidden="true">
+    <g class="roots__paths">
+      <path pathLength="1" style="--d:0"    d="M600 0 C600 80 600 120 600 160 C600 260 560 320 520 420"/>
+      <path pathLength="1" style="--d:0.05" d="M600 60 C540 90 420 100 330 170 C260 220 220 260 180 330"/>
+      <path pathLength="1" style="--d:0.05" d="M600 60 C660 90 780 100 870 170 C940 220 980 260 1020 330"/>
+      <path pathLength="1" style="--d:0.15" d="M600 140 C520 180 430 260 400 380"/>
+      <path pathLength="1" style="--d:0.15" d="M600 140 C680 180 770 260 800 380"/>
+      <path pathLength="1" style="--d:0.25" d="M330 170 C300 230 300 300 290 470"/>
+      <path pathLength="1" style="--d:0.25" d="M870 170 C900 230 900 300 910 470"/>
+      <path pathLength="1" style="--d:0.35" d="M520 420 C500 470 470 510 440 540"/>
+      <path pathLength="1" style="--d:0.3"  d="M600 160 C620 260 660 350 700 520"/>
+      <path class="thin" pathLength="1" style="--d:0.4" d="M180 330 C150 380 120 400 80 420"/>
+      <path class="thin" pathLength="1" style="--d:0.4" d="M1020 330 C1050 380 1080 400 1120 420"/>
+    </g>
+    {% set nodes = [
+      [180, 330, "#2F7A73", "Anna",  0.45, "end"],
+      [1020, 330, "#A97323", "Otto", 0.45, "start"],
+      [400, 380, "#4B64A0", "Clara", 0.5,  "end"],
+      [800, 380, "#A84545", "Jonas", 0.5,  "start"],
+      [290, 470, "#68883F", "Lena",  0.6,  "end"],
+      [910, 470, "#8D5798", "Ida",   0.6,  "start"],
+      [520, 420, "#338BA8", "Karl",  0.55, "start"],
+      [440, 540, "#BB6534", "Mia",   0.75, "end"],
+      [700, 520, "#2F7A73", "Marta", 0.7,  "start"],
+      [80, 420,  "#A97323", "Paul",  0.8,  "start"],
+      [1120, 420, "#4B64A0", "Emil", 0.8,  "end"]
+    ] %}
+    {% for n in nodes %}
+    <g class="roots__node" style="--at:{{ n[4] }}; --c:{{ n[2] }}">
+      <circle cx="{{ n[0] }}" cy="{{ n[1] }}" r="16"/>
+      <circle class="core" cx="{{ n[0] }}" cy="{{ n[1] }}" r="7"/>
+      <text x="{% if n[5] == 'end' %}{{ n[0] - 26 }}{% else %}{{ n[0] + 26 }}{% endif %}" y="{{ n[1] + 5 }}" text-anchor="{{ n[5] }}">{{ n[3] }}</text>
+    </g>
+    {% endfor %}
+  </svg>
+  <svg class="roots__edge" viewBox="0 0 1440 80" preserveAspectRatio="none" aria-hidden="true">
+    <path d="M0 42 C300 6 620 70 960 36 C1180 14 1340 28 1440 40 V80 H0Z"/>
+  </svg>
+</section>
+
+{# ── Features ── #}
+<section class="features" id="features">
+  <div class="wrap">
+    <header class="section-head reveal">
+      <p class="eyebrow">Features</p>
+      <h2>Draw a family the way you think about it.</h2>
+    </header>
+    <div class="grid">
+      {% for f in x.features %}
+      <article class="feature reveal" style="--i:{{ loop.index0 }}">
+        <div class="feature__icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24">
+            {% if f.icon == "board" %}<rect x="3" y="4" width="7" height="5" rx="1.5"/><rect x="14" y="4" width="7" height="5" rx="1.5"/><rect x="8.5" y="15" width="7" height="5" rx="1.5"/><path d="M6.5 9v3h11V9M12 12v3"/>
+            {% elif f.icon == "clans" %}<circle cx="9" cy="10" r="6"/><circle cx="15" cy="14" r="6"/>
+            {% elif f.icon == "lines" %}<path d="M4 5h6v14h10"/><path d="M17 16l3 3-3 3" transform="translate(0 -3)"/>
+            {% elif f.icon == "layout" %}<rect x="9" y="3" width="6" height="4" rx="1"/><rect x="3" y="17" width="6" height="4" rx="1"/><rect x="15" y="17" width="6" height="4" rx="1"/><path d="M12 7v5M6 17v-5h12v5"/>
+            {% elif f.icon == "files" %}<path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 12h6M9 16h6"/>
+            {% else %}<path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/>{% endif %}
+          </svg>
+        </div>
+        <h3>{{ f.title }}</h3>
+        <p>{{ f.text }}</p>
+      </article>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+
+{# ── Board showcase: the board plus UI chrome floating at different depths (data-depth) ── #}
+<section class="showcase" id="board" data-scope>
+  <div class="wrap">
+    <header class="section-head reveal">
+      <p class="eyebrow">The board</p>
+      <h2>Clans overlap. Lines find their way.</h2>
+      <p>Mia belongs to both the Weber and the Brandt clan, so the two hulls simply overlap around her.
+        Every line is named, styled by its meaning and routed around the cards.</p>
+    </header>
+
+    <div class="stage" data-tilt>
+      <div class="stage__board" data-depth="0.04">
+        <svg viewBox="0 0 960 600" role="img" aria-label="A Wurzelwerk board with two overlapping clans">
+          <defs>
+            <pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1.4" class="dot"/></pattern>
+            <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="arrowhead"/></marker>
+          </defs>
+          <rect width="960" height="600" fill="url(#dots)"/>
+
+          <g class="hull" style="--c:#2F7A73">
+            <path d="M90 100 H490 V455 H620 V545 H90 Z"/>
+            <text x="98" y="88">Weber</text>
+          </g>
+          <g class="hull" style="--c:#A97323">
+            <path d="M570 130 H940 V545 H440 V455 H570 Z"/>
+            <text x="578" y="118">Brandt</text>
+          </g>
+
+          <g class="edges">
+            <path d="M260 148 H320"/>
+            <path d="M290 148 V250 H185 V318" marker-end="url(#arrow)"/>
+            <path d="M290 250 H395 V318" marker-end="url(#arrow)"/>
+            <path d="M740 178 H770"/>
+            <path d="M755 178 V260 H665 V318" marker-end="url(#arrow)"/>
+            <path d="M470 348 H590"/>
+            <path d="M530 348 V468" marker-end="url(#arrow)"/>
+            <path class="dashed" d="M845 206 V498 H607" marker-end="url(#arrow)"/>
+          </g>
+          <g class="labels">
+            <g transform="translate(290 128)"><rect x="-30" y="-11" width="60" height="20" rx="10"/><text>married</text></g>
+            <g transform="translate(290 250)"><rect x="-38" y="-11" width="76" height="20" rx="10"/><text>parents of</text></g>
+            <g transform="translate(710 260)"><rect x="-38" y="-11" width="76" height="20" rx="10"/><text>parents of</text></g>
+            <g transform="translate(530 334)"><rect x="-30" y="-11" width="60" height="20" rx="10"/><text>married</text></g>
+            <g transform="translate(726 498)"><rect x="-48" y="-11" width="96" height="20" rx="10"/><text>godmother of</text></g>
+          </g>
+
+          {% set cards = [
+            [110, 120, "#2F7A73", "Anna Weber", "1931 – 2012", false],
+            [320, 120, "#2F7A73", "Karl Weber", "1928 – 2004", false],
+            [110, 320, "#2F7A73", "Lena Weber", "* 1958", false],
+            [320, 320, "#2F7A73", "Jonas Weber", "* 1961", false],
+            [590, 150, "#A97323", "Otto Brandt", "1932 – 2019", false],
+            [770, 150, "#A97323", "Ida Brandt", "* 1935", false],
+            [590, 320, "#A97323", "Marta Brandt", "* 1960", true],
+            [455, 470, "#2F7A73", "Mia Weber", "* 1990", false]
+          ] %}
+          <g class="cards">
+            {% for c in cards %}
+            <g transform="translate({{ c[0] }} {{ c[1] }})" style="--c:{{ c[2] }}" {% if c[5] %}class="selected"{% endif %}>
+              {% if c[5] %}<rect class="sel" x="-5" y="-5" width="160" height="66" rx="14"/>{% endif %}
+              <rect class="body" width="150" height="56" rx="10"/>
+              <rect class="bar" width="5" height="56" rx="2.5"/>
+              <text class="name" x="18" y="24">{{ c[3] }}</text>
+              <text class="years" x="18" y="43">{{ c[4] }}</text>
+              {% if c[5] %}<circle class="handle" cx="150" cy="28" r="7"/>{% endif %}
+            </g>
+            {% endfor %}
+          </g>
+        </svg>
+      </div>
+
+      <div class="chrome chrome--toolbar" data-depth="0.16" aria-hidden="true">
+        <span class="on">Select</span><span>Clan</span><span>Person</span><span>Connect</span><i></i><span>Auto-layout</span>
+      </div>
+      <div class="chrome chrome--inspector" data-depth="0.28" aria-hidden="true">
+        <small>Person</small>
+        <strong>Marta Brandt</strong>
+        <span class="muted">born 1960</span>
+        <div class="chips"><em style="--c:#A97323">Brandt</em></div>
+        <div class="row"><span>married</span><b>Jonas Weber</b></div>
+        <div class="row"><span>parents of</span><b>Mia Weber</b></div>
+        <div class="drop">Drop files here</div>
+      </div>
+      <div class="chrome chrome--zoom" data-depth="0.2" aria-hidden="true"><span>−</span><b>100 %</b><span>+</span></div>
+      <div class="chrome chrome--toast" data-depth="0.34" aria-hidden="true"><i></i>Auto-layout applied · 3 crossings removed</div>
+    </div>
+  </div>
+</section>
+
+{# ── Internals ── #}
+<section class="internals" id="internals">
+  <div class="wrap">
+    <header class="section-head reveal">
+      <p class="eyebrow">Under the hood</p>
+      <h2>Rust, a GPU canvas and an embedded database.</h2>
+      <p>Built on <a href="https://iced.rs">iced</a> with a wgpu renderer and an embedded RedDB document store.
+        It is written for large boards from the start.</p>
+    </header>
+    <div class="stats">
+      {% for s in x.internals %}
+      <div class="stat reveal" style="--i:{{ loop.index0 }}">
+        <span class="stat__value">{{ s.value }}</span>
+        <span class="stat__label">{{ s.label }}</span>
+        <p>{{ s.text }}</p>
+      </div>
+      {% endfor %}
+    </div>
+
+    <div class="keys reveal">
+      <h3>Hands on the keyboard</h3>
+      <ul>
+        {% for k in x.shortcuts %}
+        <li>{% for key in k.keys %}<kbd>{{ key }}</kbd>{% if not loop.last %}+{% endif %}{% endfor %}<span>{{ k.label }}</span></li>
+        {% endfor %}
+      </ul>
+    </div>
+  </div>
+</section>
+
+{# ── Download: the landscape again, this time seen from below ── #}
+<section class="download" id="download" data-scope>
+  <svg class="download__hills download__hills--back" data-depth="-0.12" viewBox="0 0 1440 300" preserveAspectRatio="none" aria-hidden="true">
+    <path d="M0 140 C200 80 420 120 640 95 C860 70 1060 130 1260 105 C1360 92 1410 100 1440 104 V300 H0Z"/>
+  </svg>
+  <svg class="download__hills download__hills--front" data-depth="-0.04" viewBox="0 0 1440 300" preserveAspectRatio="none" aria-hidden="true">
+    <path d="M0 190 C240 150 470 200 720 175 C970 150 1200 205 1440 170 V300 H0Z"/>
+  </svg>
+  <div class="wrap download__inner reveal">
+    <h2>Plant your family tree.</h2>
+    <p>Free and open source. Pick your platform from the latest release.</p>
+    <div class="platforms">
+      {% for d in x.downloads %}
+      <a class="platform" href="{{ config.extra.releases }}">
+        <strong>{{ d.os }}</strong>
+        <span>{{ d.files }}</span>
+      </a>
+      {% endfor %}
+    </div>
+    <p class="muted">Or build it yourself: <code>cargo run --release</code></p>
+  </div>
+</section>
+{% endblock %}

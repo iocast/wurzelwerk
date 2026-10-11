@@ -1,0 +1,14 @@
+# Zola site for Wurzelwerk – published to GitHub Pages by .github/workflows/website.yml
+# (the workflow overrides base_url with the Pages URL).
+base_url = "https://iocast.github.io/wurzelwerk"
+title = "Wurzelwerk"
+description = "A desktop board for families and clans – draw people, clans and the lines between them."
+default_language = "en"
+compile_sass = true
+minify_html = true
+build_search_index = false
+generate_feeds = false
+
+[extra]
+repo = "https://github.com/iocast/wurzelwerk"
+releases = "https://github.com/iocast/wurzelwerk/releases/latest"

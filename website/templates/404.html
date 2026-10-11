@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Not found · {{ config.title }}{% endblock %}
+{% block content %}
+<section class="hero hero--small">
+  <div class="hero__title">
+    <img class="hero__logo" src="{{ get_url(path='logo.svg') }}" alt="" width="128" height="128">
+    <h1>404</h1>
+    <p class="hero__sub">This branch of the family tree does not exist.</p>
+    <div class="hero__cta"><a class="btn" href="{{ get_url(path='/') }}">Back to the board</a></div>
+  </div>
+  <svg class="hero__layer hero__layer--mid" viewBox="0 0 1440 400" preserveAspectRatio="none" aria-hidden="true">
+    <path d="M0 295 C200 245 360 285 560 265 C760 245 900 305 1100 285 C1260 270 1360 245 1440 255 V400 H0Z"/>
+  </svg>
+  <svg class="hero__layer hero__layer--ground" viewBox="0 0 1440 400" preserveAspectRatio="none" aria-hidden="true">
+    <path d="M0 360 C240 342 480 372 720 356 C960 340 1200 366 1440 350 V400 H0Z"/>
+  </svg>
+</section>
+{% endblock %}

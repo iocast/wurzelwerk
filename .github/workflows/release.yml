@@ -73,8 +73,8 @@ jobs:
       - name: Load the updater signing key
         shell: bash
         env:
-          KEY: ${{ secrets.FLOETASK_UPDATE_PRIVATE_KEY }}
-          PASSWORD: ${{ secrets.FLOETASK_UPDATE_KEY_PASSWORD }}
+          KEY: ${{ secrets.WURZELWERK_UPDATE_PRIVATE_KEY }}
+          PASSWORD: ${{ secrets.WURZELWERK_UPDATE_KEY_PASSWORD }}
         run: |
           KEY="$(printf '%s' "$KEY" | tr -d '[:space:]')"
           if [ -n "$KEY" ]; then
@@ -82,19 +82,19 @@ jobs:
             echo "CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
             echo "Signing installers for the updater."
           else
-            echo "::warning::FLOETASK_UPDATE_PRIVATE_KEY is not set: installers are not signed and this release cannot be offered as an update."
+            echo "::warning::WURZELWERK_UPDATE_PRIVATE_KEY is not set: installers are not signed and this release cannot be offered as an update."
           fi
 
       - name: Build installers
-        run: cargo packager --release -p floetask-app --formats ${{ matrix.formats }}
+        run: cargo packager --release -p wurzelwerk-app --formats ${{ matrix.formats }}
         env:
           # The AppImage tooling is itself an AppImage; runners have no FUSE.
           APPIMAGE_EXTRACT_AND_RUN: 1
           # Compiled into the app: where the updater looks and which key it
           # trusts (features/todo-notes/14-platform.md §14.2). Without them the build
           # works but cannot update itself.
-          FLOETASK_UPDATE_ENDPOINT: https://github.com/${{ github.repository }}/releases/latest/download/latest.json
-          FLOETASK_UPDATE_PUBLIC_KEY: ${{ vars.FLOETASK_UPDATE_PUBLIC_KEY }}
+          WURZELWERK_UPDATE_ENDPOINT: https://github.com/${{ github.repository }}/releases/latest/download/latest.json
+          WURZELWERK_UPDATE_PUBLIC_KEY: ${{ vars.WURZELWERK_UPDATE_PUBLIC_KEY }}
 
       - name: Upload installers
         uses: actions/upload-artifact@v6
