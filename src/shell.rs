@@ -8,21 +8,21 @@ use std::time::Duration;
 
 use iced::widget::{
     Column, Row, button, checkbox, column, container, image, opaque, pick_list, row, scrollable,
-    stack, text, text_input,
+    space, stack, text, text_input,
 };
-use iced::{Element, Event, Font, Length, Size, Subscription, Task, Theme, alignment, event, font, keyboard, window};
+use iced::{Element, Event, Length, Padding, Size, Subscription, Task, Theme, alignment, event, keyboard, theme, window};
 
-use crate::app::{App, Config, Init, Message, hint, hline, section, vline};
+use crate::app::{App, Config, Init, Message, hint, hline, icon, icon_label, section, tip, vline};
 use crate::files;
 use crate::i18n::{self, Lang, t, tf};
-use crate::settings::{self, Settings};
+use crate::settings::{self, Appearance, Settings};
 use crate::store::{self, Db};
 use crate::ui;
 use crate::update::{self, Check};
 
 const LOGO: &[u8] = include_bytes!("../assets/icon-256.png");
-const DIALOG_W: f32 = 780.0;
-const DIALOG_H: f32 = 520.0;
+const DIALOG_W: f32 = 820.0;
+const DIALOG_H: f32 = 560.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsPage {
@@ -41,6 +41,15 @@ impl SettingsPage {
             Self::Workspace => t("Workspace"),
             Self::Updates => t("Updates"),
             Self::About => t("About"),
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Self::General => "⚙",
+            Self::Workspace => "▤",
+            Self::Updates => "⟳",
+            Self::About => "✦",
         }
     }
 }
@@ -113,6 +122,8 @@ pub enum ShellMessage {
     OpenSettings(SettingsPage),
     CloseSettings,
     SetLanguage(Lang),
+    SetAppearance(Appearance),
+    SystemTheme(theme::Mode),
     SetCheckUpdates(bool),
     // updates
     CheckUpdates,
@@ -134,6 +145,8 @@ pub struct Shell {
     update_dismissed: bool,
     window: Option<Size>,
     logo: image::Handle,
+    /// Operating system prefers a dark look (used by [`Appearance::System`]).
+    system_dark: bool,
 }
 
 impl Shell {
@@ -151,7 +164,9 @@ impl Shell {
             update_dismissed: false,
             window: None,
             logo: image::Handle::from_bytes(LOGO),
+            system_dark: false,
         };
+        shell.apply_appearance();
 
         let saved = shell
             .settings
@@ -164,7 +179,7 @@ impl Shell {
             (None, None) => (legacy_workspace(), true),
         };
 
-        let mut tasks = Vec::new();
+        let mut tasks = vec![iced::system::theme().map(ShellMessage::SystemTheme)];
         if let Some(path) = start {
             tasks.push(shell.open_workspace(path, persist, cli.demo));
         }
@@ -182,7 +197,23 @@ impl Shell {
     }
 
     pub fn theme(&self) -> Theme {
-        Theme::Light
+        ui::theme()
+    }
+
+    fn dark(&self) -> bool {
+        match self.settings.appearance {
+            Appearance::System => self.system_dark,
+            Appearance::Light => false,
+            Appearance::Dark => true,
+        }
+    }
+
+    /// Switches the palette and redraws everything that caches colours.
+    fn apply_appearance(&mut self) {
+        ui::set_dark(self.dark());
+        if let Some(app) = &mut self.app {
+            app.restyle();
+        }
     }
 
     pub fn subscription(&self) -> Subscription<ShellMessage> {
@@ -195,7 +226,10 @@ impl Shell {
             _ => None,
         });
         // the workspace subscribes to Escape itself
-        let mut subs = vec![resize];
+        let mut subs = vec![
+            resize,
+            iced::system::theme_changes().map(ShellMessage::SystemTheme),
+        ];
         if let Some(app) = &self.app {
             subs.push(app.subscription().map(ShellMessage::App));
         }
@@ -210,13 +244,30 @@ impl Shell {
         match message {
             ShellMessage::App(Message::OpenSettings(page)) => self.dialog = Some(page),
             ShellMessage::App(Message::Escape) if self.dialog.is_some() => self.dialog = None,
+            ShellMessage::App(Message::ToggleTheme) => {
+                self.settings.appearance = if self.dark() {
+                    Appearance::Light
+                } else {
+                    Appearance::Dark
+                };
+                self.apply_appearance();
+                self.save_settings();
+            }
             ShellMessage::App(msg) => {
                 if let Message::WindowResized(size) = msg {
                     self.window = Some(size);
                 }
                 // the dialog is modal: keep keyboard shortcuts away from the board
                 if self.dialog.is_some()
-                    && matches!(msg, Message::DeleteKey | Message::Escape)
+                    && matches!(
+                        msg,
+                        Message::DeleteKey
+                            | Message::Escape
+                            | Message::EnterKey
+                            | Message::Shortcut(_)
+                            | Message::FocusSearch
+                            | Message::ToggleSidebar
+                    )
                 {
                     return Task::none();
                 }
@@ -275,6 +326,15 @@ impl Shell {
                     // text drawn on the canvas is cached
                     app.cache.clear();
                 }
+            }
+            ShellMessage::SetAppearance(appearance) => {
+                self.settings.appearance = appearance;
+                self.apply_appearance();
+                self.save_settings();
+            }
+            ShellMessage::SystemTheme(mode) => {
+                self.system_dark = mode == theme::Mode::Dark;
+                self.apply_appearance();
             }
             ShellMessage::SetCheckUpdates(on) => {
                 self.settings.check_updates = on;
@@ -346,6 +406,7 @@ impl Shell {
         if let Some(size) = self.window {
             let _ = app.update(Message::WindowResized(size));
         }
+        app.restyle();
 
         self.app = Some(app);
         self.error = None;
@@ -393,21 +454,22 @@ impl Shell {
     fn view_update_banner(&self, release: &update::Release) -> Element<'_, ShellMessage> {
         container(
             row![
+                icon("✦").size(14).color(ui::pal().accent),
                 text(tf("Version {} is available.", &[&release.version]))
                     .size(13)
                     .width(Length::Fill),
                 button(text(t("Download")).size(12))
-                    .padding([3, 10])
-                    .style(ui::tool(true))
+                    .padding([4, 12])
+                    .style(ui::primary)
                     .on_press(ShellMessage::OpenUrl(release.url.clone())),
                 button(text(t("Dismiss")).size(12))
-                    .padding([3, 10])
-                    .style(ui::tool(false))
+                    .padding([4, 12])
+                    .style(ui::secondary)
                     .on_press(ShellMessage::DismissUpdate),
             ]
-            .spacing(8)
+            .spacing(10)
             .align_y(alignment::Vertical::Center)
-            .padding([6, 12]),
+            .padding([6, 14]),
         )
         .width(Length::Fill)
         .style(ui::banner)
@@ -415,62 +477,112 @@ impl Shell {
     }
 
     fn view_welcome(&self) -> Element<'_, ShellMessage> {
-        let mut body = Column::new()
-            .spacing(14)
-            .width(Length::Fixed(520.0))
-            .align_x(alignment::Horizontal::Center)
-            .push(image(self.logo.clone()).width(112).height(112))
-            .push(text(t("Welcome to Wurzelwerk")).size(26).font(bold()))
-            .push(
-                text(t(
-                    "Create a workspace to get started. A workspace is a folder that holds your families, clans, notes and files.",
-                ))
-                .size(14)
-                .color(ui::MUTED)
-                .align_x(alignment::Horizontal::Center),
-            )
-            .push(
-                column![
-                    section(t("Workspace location")),
-                    self.path_row(t("Create workspace")),
-                ]
-                .spacing(6)
-                .width(Length::Fill),
-            );
+        let mut form = Column::new()
+            .spacing(10)
+            .width(Length::Fill)
+            .push(section(t("WORKSPACE LOCATION")))
+            .push(self.path_row(t("Create workspace")))
+            .push(hint(t(
+                "Pick an existing workspace folder to open it, or a new folder to start fresh.",
+            )));
         if let Some(e) = &self.error {
-            body = body.push(text(e.as_str()).size(13).color(ui::DANGER));
+            form = form.push(text(e.as_str()).size(13).color(ui::pal().danger));
         }
 
-        column![
-            container(
-                button(text(t("Settings")).size(13))
-                    .padding([6, 12])
-                    .style(ui::tool(false))
-                    .on_press(ShellMessage::OpenSettings(SettingsPage::General))
+        let mut card = Column::new()
+            .spacing(16)
+            .align_x(alignment::Horizontal::Center)
+            .push(image(self.logo.clone()).width(96).height(96))
+            .push(
+                column![
+                    text(t("Welcome to Wurzelwerk")).size(28).font(ui::BOLD),
+                    text(t(
+                        "Create a workspace to get started. A workspace is a folder that holds your families, clans, notes and files.",
+                    ))
+                    .size(14)
+                    .color(ui::pal().muted)
+                    .align_x(alignment::Horizontal::Center),
+                ]
+                .spacing(8)
+                .align_x(alignment::Horizontal::Center),
             )
-            .width(Length::Fill)
-            .align_x(alignment::Horizontal::Right)
-            .padding(12),
-            container(body).center(Length::Fill),
+            .push(container(form).padding(18).style(ui::section_card));
+
+        if !self.settings.recent.is_empty() {
+            let mut recent = Column::new().spacing(4).width(Length::Fill);
+            recent = recent.push(section(t("RECENT WORKSPACES")));
+            for path in &self.settings.recent {
+                recent = recent.push(recent_row(path));
+            }
+            card = card.push(recent);
+        }
+
+        let top = row![
+            space::horizontal(),
+            tip(
+                button(icon(if ui::pal().dark { "☀" } else { "☾" }).size(15))
+                    .padding([5, 9])
+                    .style(ui::icon)
+                    .on_press(ShellMessage::SetAppearance(if ui::pal().dark {
+                        Appearance::Light
+                    } else {
+                        Appearance::Dark
+                    })),
+                if ui::pal().dark {
+                    t("Light mode")
+                } else {
+                    t("Dark mode")
+                },
+            ),
+            button(icon_label("⚙", t("Settings")))
+                .padding([6, 12])
+                .style(ui::secondary)
+                .on_press(ShellMessage::OpenSettings(SettingsPage::General)),
         ]
+        .spacing(8)
+        .align_y(alignment::Vertical::Center)
+        .padding(14);
+
+        container(
+            column![
+                top,
+                container(
+                    scrollable(
+                        container(card.width(Length::Fixed(560.0)))
+                            .width(Length::Fill)
+                            .align_x(alignment::Horizontal::Center)
+                            .padding([0, 24]),
+                    )
+                    .style(ui::scroll),
+                )
+                .center(Length::Fill),
+            ],
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|theme| container::Style {
+            background: Some(ui::pal().board.into()),
+            ..ui::panel(theme)
+        })
         .into()
     }
 
     /// `[ path input ] [Browse…] [action]` shared by the welcome screen and the workspace page.
     fn path_row(&self, action: &'static str) -> Element<'_, ShellMessage> {
         row![
-            text_input("", &self.path_input)
+            text_input(t("Folder path"), &self.path_input)
                 .on_input(ShellMessage::PathInput)
                 .on_submit(ShellMessage::SubmitPath)
                 .size(13)
-                .padding(7),
+                .padding([8, 10])
+                .style(ui::input),
             button(text(t("Browse…")).size(13))
-                .padding([7, 12])
-                .style(ui::tool(false))
+                .padding([8, 12])
+                .style(ui::secondary)
                 .on_press(ShellMessage::Browse),
             button(text(action).size(13))
-                .padding([7, 12])
-                .style(ui::tool(true))
+                .padding([8, 14])
+                .style(ui::primary)
                 .on_press(ShellMessage::SubmitPath),
         ]
         .spacing(8)
@@ -479,14 +591,33 @@ impl Shell {
     }
 
     fn view_dialog(&self, current: SettingsPage) -> Element<'_, ShellMessage> {
-        let mut nav = Column::new().spacing(2).width(Length::Fixed(180.0));
+        let mut nav = Column::new()
+            .spacing(2)
+            .width(Length::Fixed(200.0))
+            .push(
+                container(text(t("Settings")).size(18).font(ui::BOLD))
+                    .padding([6, 10])
+                    .height(Length::Fixed(44.0)),
+            );
         for page in SettingsPage::ALL {
+            let active = page == current;
             nav = nav.push(
-                button(text(page.label()).size(14))
-                    .width(Length::Fill)
-                    .padding([7, 12])
-                    .style(ui::list_item(page == current))
-                    .on_press(ShellMessage::OpenSettings(page)),
+                button(
+                    row![
+                        icon(page.icon()).size(14).color(if active {
+                            ui::pal().accent
+                        } else {
+                            ui::pal().muted
+                        }),
+                        text(page.label()).size(14),
+                    ]
+                    .spacing(10)
+                    .align_y(alignment::Vertical::Center),
+                )
+                .width(Length::Fill)
+                .padding([8, 12])
+                .style(ui::list_item(active))
+                .on_press(ShellMessage::OpenSettings(page)),
             );
         }
 
@@ -498,31 +629,40 @@ impl Shell {
         };
 
         let header = row![
-            text(t("Settings")).size(16).font(bold()).width(Length::Fill),
-            button(text(t("Close")).size(13))
-                .padding([4, 12])
-                .style(ui::tool(false))
-                .on_press(ShellMessage::CloseSettings),
+            text(current.label()).size(18).font(ui::BOLD).width(Length::Fill),
+            tip(
+                button(icon("✕").size(14))
+                    .padding([5, 9])
+                    .style(ui::icon)
+                    .on_press(ShellMessage::CloseSettings),
+                t("Close"),
+            ),
         ]
         .align_y(alignment::Vertical::Center)
-        .padding([10, 16]);
+        .height(Length::Fixed(44.0));
 
         let dialog = container(
-            column![
-                header,
-                hline(),
-                row![
-                    container(nav).padding(10).style(ui::panel).height(Length::Fill),
-                    vline(),
-                    scrollable(container(content).padding(24).width(Length::Fill))
+            row![
+                container(nav)
+                    .padding(12)
+                    .style(ui::chrome)
+                    .height(Length::Fill),
+                vline(),
+                column![
+                    container(header).padding(Padding::from([10, 24]).right(14)),
+                    scrollable(container(content).padding(Padding::from([8, 24]).bottom(24)).width(Length::Fill))
+                        .style(ui::scroll)
                         .width(Length::Fill)
                         .height(Length::Fill),
                 ]
+                .width(Length::Fill)
                 .height(Length::Fill),
-            ],
+            ]
+            .height(Length::Fill),
         )
         .width(Length::Fixed(DIALOG_W))
         .height(Length::Fixed(DIALOG_H))
+        .clip(true)
         .style(ui::dialog);
 
         container(dialog)
@@ -532,73 +672,122 @@ impl Shell {
     }
 
     fn page_general(&self) -> Element<'_, ShellMessage> {
+        let appearance = Row::with_children(Appearance::ALL.into_iter().map(|a| {
+            let glyph = match a {
+                Appearance::System => "◐",
+                Appearance::Light => "☀",
+                Appearance::Dark => "☾",
+            };
+            button(
+                column![icon(glyph).size(20), text(a.to_string()).size(13)]
+                    .spacing(6)
+                    .width(Length::Fill)
+                    .align_x(alignment::Horizontal::Center),
+            )
+            .width(Length::Fixed(120.0))
+            .padding([12, 10])
+            .style(ui::segment(self.settings.appearance == a))
+            .on_press(ShellMessage::SetAppearance(a))
+            .into()
+        }))
+        .spacing(4);
+
         column![
-            section(t("Language")),
-            hint(t("Language of the user interface.")),
-            pick_list(Lang::ALL, Some(self.settings.language), ShellMessage::SetLanguage)
-                .text_size(13)
-                .padding([6, 10]),
+            setting(
+                t("APPEARANCE"),
+                t("Choose a light or dark look, or follow the system."),
+                container(appearance).padding(4).style(ui::segments),
+            ),
+            setting(
+                t("LANGUAGE"),
+                t("Language of the user interface."),
+                pick_list(Lang::ALL, Some(self.settings.language), ShellMessage::SetLanguage)
+                    .text_size(13)
+                    .padding([7, 12])
+                    .style(ui::pick)
+                    .width(Length::Fixed(220.0)),
+            ),
         ]
-        .spacing(10)
+        .spacing(26)
         .into()
     }
 
     fn page_workspace(&self) -> Element<'_, ShellMessage> {
-        let mut page = Column::new().spacing(10);
+        let mut page = Column::new().spacing(26);
 
         if let Some(app) = &self.app {
-            page = page
-                .push(section(t("Current workspace")))
-                .push(text(app.cfg.project.display().to_string()).size(13))
-                .push(
-                    button(text(t("Open folder")).size(13))
-                        .padding([6, 12])
-                        .style(ui::tool(false))
-                        .on_press(ShellMessage::OpenPath(app.cfg.project.clone())),
-                );
+            page = page.push(setting(
+                t("CURRENT WORKSPACE"),
+                t("Everything you see on the board is stored in this folder."),
+                container(
+                    row![
+                        icon("▤").size(18).color(ui::pal().accent),
+                        column![
+                            text(app.workspace_name()).size(14).font(ui::SEMIBOLD),
+                            text(app.cfg.project.display().to_string())
+                                .size(12)
+                                .color(ui::pal().muted),
+                        ]
+                        .spacing(2)
+                        .width(Length::Fill),
+                        button(text(t("Open folder")).size(13))
+                            .padding([6, 12])
+                            .style(ui::secondary)
+                            .on_press(ShellMessage::OpenPath(app.cfg.project.clone())),
+                    ]
+                    .spacing(12)
+                    .align_y(alignment::Vertical::Center),
+                )
+                .padding(14)
+                .style(ui::section_card),
+            ));
         }
 
-        page = page
-            .push(section(t("Switch workspace")))
-            .push(hint(t(
-                "Pick a folder to open it as workspace. A new or empty folder becomes a new workspace.",
-            )))
-            .push(self.path_row(t("Open")));
+        let mut switch = Column::new().spacing(8).push(self.path_row(t("Open")));
         if let Some(e) = &self.error {
-            page = page.push(text(e.as_str()).size(13).color(ui::DANGER));
+            switch = switch.push(text(e.as_str()).size(13).color(ui::pal().danger));
         }
+        page = page.push(setting(
+            t("SWITCH WORKSPACE"),
+            t("Pick a folder to open it as workspace. A new or empty folder becomes a new workspace."),
+            switch,
+        ));
 
         let current = self.app.as_ref().map(|a| &a.cfg.project);
-        let mut recent = Column::new().spacing(2);
+        let mut recent = Column::new().spacing(4);
         let mut any = false;
         for path in self.settings.recent.iter().filter(|p| Some(*p) != current) {
             any = true;
-            recent = recent.push(
-                button(text(path.display().to_string()).size(13))
-                    .width(Length::Fill)
-                    .padding([6, 10])
-                    .style(ui::card)
-                    .on_press(ShellMessage::OpenWorkspace(path.clone())),
-            );
+            recent = recent.push(recent_row(path));
         }
         if !any {
             recent = recent.push(hint(t("No other workspaces yet.")));
         }
-        page.push(section(t("Recent workspaces"))).push(recent).into()
+        page.push(setting(
+            t("RECENT WORKSPACES"),
+            t("Open one of the workspaces you used before."),
+            recent,
+        ))
+        .into()
     }
 
     fn page_updates(&self) -> Element<'_, ShellMessage> {
         let status: Element<'_, ShellMessage> = match &self.update {
             UpdateState::Idle => text("").into(),
-            UpdateState::Checking => text(t("Checking…")).size(13).into(),
-            UpdateState::Done(Check::UpToDate) => text(t("You are up to date.")).size(13).into(),
+            UpdateState::Checking => text(t("Checking…")).size(13).color(ui::pal().muted).into(),
+            UpdateState::Done(Check::UpToDate) => row![
+                icon("✓").size(13).color(ui::pal().success),
+                text(t("You are up to date.")).size(13),
+            ]
+            .spacing(6)
+            .into(),
             UpdateState::Done(Check::Available(release)) => row![
                 text(tf("Version {} is available.", &[&release.version]))
                     .size(13)
                     .width(Length::Fill),
                 button(text(t("Download")).size(13))
                     .padding([6, 12])
-                    .style(ui::tool(true))
+                    .style(ui::primary)
                     .on_press(ShellMessage::OpenUrl(release.url.clone())),
             ]
             .spacing(8)
@@ -606,46 +795,45 @@ impl Shell {
             .into(),
             UpdateState::Failed(e) => text(tf("Update check failed: {}", &[e]))
                 .size(13)
-                .color(ui::DANGER)
+                .color(ui::pal().danger)
                 .into(),
         };
 
-        let mut check = button(text(t("Check now")).size(13))
-            .padding([6, 12])
-            .style(ui::tool(false));
+        let mut check = button(icon_label("⟳", t("Check now")))
+            .padding([7, 14])
+            .style(ui::secondary);
         if !matches!(self.update, UpdateState::Checking) {
             check = check.on_press(ShellMessage::CheckUpdates);
         }
 
         column![
-            section(t("Updates")),
-            text(tf("Current version: {}", &[&update::VERSION])).size(13),
-            checkbox(self.settings.check_updates)
-                .label(t("Check for updates on start"))
-                .on_toggle(ShellMessage::SetCheckUpdates)
-                .text_size(13),
-            row![check, container(status).width(Length::Fill)]
-                .spacing(12)
-                .align_y(alignment::Vertical::Center),
+            setting(
+                t("VERSION"),
+                tf("Current version: {}", &[&update::VERSION]),
+                row![check, container(status).width(Length::Fill)]
+                    .spacing(12)
+                    .align_y(alignment::Vertical::Center),
+            ),
+            setting(
+                t("AUTOMATIC CHECK"),
+                t("Looks for a new release on GitHub when Wurzelwerk starts."),
+                checkbox(self.settings.check_updates)
+                    .label(t("Check for updates on start"))
+                    .on_toggle(ShellMessage::SetCheckUpdates)
+                    .text_size(13),
+            ),
         ]
-        .spacing(12)
+        .spacing(26)
         .into()
     }
 
     fn page_about(&self) -> Element<'_, ShellMessage> {
-        let link = |label: &'static str, url: &'static str| {
-            button(text(label).size(13))
-                .padding([6, 12])
-                .style(ui::tool(false))
-                .on_press(ShellMessage::OpenUrl(url.into()))
-        };
-
         let title = row![
-            image(self.logo.clone()).width(88).height(88),
+            image(self.logo.clone()).width(80).height(80),
             column![
-                text("Wurzelwerk").size(26).font(bold()),
+                text("Wurzelwerk").size(26).font(ui::BOLD),
                 text(tf("Version {}", &[&update::VERSION])).size(14),
-                text(t("Clans & families board")).size(13).color(ui::MUTED),
+                text(t("Clans & families board")).size(13).color(ui::pal().muted),
             ]
             .spacing(4),
         ]
@@ -657,28 +845,76 @@ impl Shell {
 
         column![
             title,
-            section(t("Settings file")),
-            hint(t("Global settings are stored here:")),
-            text(settings_file.display().to_string()).size(13),
-            button(text(t("Open folder")).size(13))
-                .padding([6, 12])
-                .style(ui::tool(false))
-                .on_press(ShellMessage::OpenPath(folder)),
-            section(t("Licence")),
-            text("MIT OR Apache-2.0").size(13),
-            section(t("Source code")),
-            Row::new().push(link(update::REPO_URL, update::REPO_URL)),
+            setting(
+                t("SETTINGS FILE"),
+                t("Global settings are stored here:"),
+                column![
+                    text(settings_file.display().to_string()).size(13),
+                    button(text(t("Open folder")).size(13))
+                        .padding([6, 12])
+                        .style(ui::secondary)
+                        .on_press(ShellMessage::OpenPath(folder)),
+                ]
+                .spacing(8),
+            ),
+            setting(t("LICENCE"), "MIT OR Apache-2.0", Row::new()),
+            setting(
+                t("SOURCE CODE"),
+                update::REPO_URL,
+                button(icon_label("↗", t("Open on GitHub")))
+                    .padding([6, 12])
+                    .style(ui::secondary)
+                    .on_press(ShellMessage::OpenUrl(update::REPO_URL.into())),
+            ),
         ]
-        .spacing(10)
+        .spacing(24)
         .into()
     }
 }
 
-fn bold() -> Font {
-    Font {
-        weight: font::Weight::Bold,
-        ..Font::DEFAULT
-    }
+/// Settings block: caption, explanation and the control.
+fn setting<'a>(
+    title: &'a str,
+    explain: impl ToString,
+    control: impl Into<Element<'a, ShellMessage>>,
+) -> Element<'a, ShellMessage> {
+    column![
+        column![
+            section(title),
+            text(explain.to_string()).size(12).color(ui::pal().muted)
+        ]
+        .spacing(4),
+        control.into()
+    ]
+    .spacing(10)
+    .into()
+}
+
+/// Clickable recent-workspace row: folder name over the full path.
+fn recent_row<'a>(path: &Path) -> Element<'a, ShellMessage> {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    button(
+        row![
+            icon("▤").size(14).color(ui::pal().muted),
+            column![
+                text(name).size(13).font(ui::SEMIBOLD),
+                text(path.display().to_string()).size(11).color(ui::pal().muted),
+            ]
+            .spacing(1)
+            .width(Length::Fill),
+            icon("→").size(13).color(ui::pal().subtle),
+        ]
+        .spacing(10)
+        .align_y(alignment::Vertical::Center),
+    )
+    .width(Length::Fill)
+    .padding([7, 12])
+    .style(ui::card)
+    .on_press(ShellMessage::OpenWorkspace(path.to_path_buf()))
+    .into()
 }
 
 /// Opens the database of a workspace folder and boots the board on it.

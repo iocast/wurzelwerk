@@ -43,11 +43,18 @@ cargo run --release -- --demo 40x250         # empty workspace + 10 000 generate
 * All RedDB code is in `src/store.rs` (`Store`).
 
 ## UI
-Toolbar: Select · + Person · Connect · Clan · Auto-layout · Fit to window · Search
-Left: clans (colour, member count, + New clan) and people (filtered by search)
-Board: people cards, orthogonal lines with names, clans as coloured hulls (a person can be in several clans)
-Right: person (name, born/died, clan chips, lines, files + drop zone) / clan editor / "name the line" form
-Status: `N people · M clans · L lines · all changes saved`
+Toolbar: sidebar toggle · workspace switcher · tools (Select · Clan · Person · Connect) · Auto-layout · Fit · Search · light/dark · Settings
+Left (collapsible sections, hide with Ctrl+B): clans (colour, member count, + New clan), people (avatar, years; filtered by search) and books
+Board: people cards (accent bar in the first clan's colour), orthogonal lines with names, clans as coloured hulls (a person can be in several clans);
+clans without members as a dashed box with their name (drag to move, click to open), floating zoom controls, a hint while a tool is active, toasts for notices and a start card on an empty board
+Right: person (name, born/died, clan chips, lines, notes, files + drop zone) / clan (colour palette, members, notes) / line (editable relationship, route) / "name the line" form; quick start and shortcuts when nothing is selected
+Clan tool: click on the board to place a new clan. Person tool: a click inside an empty clan's box adds the person to that clan; elsewhere the person joins the clan selected in the sidebar (click it again, its ✕ or Esc for no clan).
+Deleting a person, clan or book page asks for confirmation (Enter confirms, Esc cancels).
+Status: save state · `N people · M clans · L lines` · zoom
+Appearance: System / Light / Dark (*Settings → General*, or the moon/sun button in the toolbar). Colours live in `src/ui.rs`.
+
+Keyboard (when no text field has focus): `V` Select · `G` Clan · `P` Person · `C` Connect · `F` fit · `+`/`-`/`0` zoom ·
+`Ctrl+F` search · `Ctrl+B` sidebar · `Ctrl+,` settings · `Del` delete selection · `Esc` cancel / deselect
 
 Connect: drag from a person (Connect tool) or from the ◯ handle of the selected person onto another person, then name the line.
 `married / siblings / partner` = plain line, `parents of / father of / mother of` = arrow, anything else (e.g. `godfather of`) = dashed arrow.

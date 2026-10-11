@@ -3,17 +3,17 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use iced::font::Weight;
 use iced_markdown_editor::{
     Action, EditorState, Event as EditorEvent, Paper, ZoomSettings, markdown_editor,
 };
 use iced::widget::{
-    Column, Row, Text, button, canvas, column, container, pick_list, row, scrollable, text, text_input,
+    Column, Row, Text, button, canvas, column, container, opaque, operation, pick_list, row,
+    scrollable, space, stack, text, text_input, tooltip,
 };
 use iced::{
-    Element, Event, Font, Length, Point, Rectangle, Size, Subscription, Task, Vector,
+    Color, Element, Event, Length, Padding, Point, Rectangle, Size, Subscription, Task, Vector,
     alignment, event, keyboard, window,
 };
 
@@ -26,19 +26,22 @@ use crate::layout;
 use crate::routing::Routes;
 use crate::shell::SettingsPage;
 use crate::model::{
-    Clan, Data, FileRec, Id, LINK_PRESETS, Link, LinkLabelPosition, LinkStyle, NODE_H, NODE_W,
+    CLAN_BOX_H, CLAN_BOX_W, Clan, Data, FileRec, Id, LINK_PRESETS, Link, LinkLabelPosition, LinkStyle, NODE_H, NODE_W,
     PALETTE, Person, link_style, new_id,
 };
 use crate::spatial::{self, Grid, Hull};
 use crate::store::{CLANS, Cmd, Db, FILES, LINKS, PEOPLE};
 use crate::ui;
 
-const SIDEBAR_W: f32 = 220.0;
-const INSPECTOR_W: f32 = 300.0;
-const TOOLBAR_H: f32 = 52.0;
+const SIDEBAR_W: f32 = 256.0;
+const INSPECTOR_W: f32 = 330.0;
+const TOOLBAR_H: f32 = 54.0;
 const STATUS_H: f32 = 28.0;
 const MAX_PEOPLE_LIST: usize = 150;
 const MAX_LINES_LIST: usize = 100;
+/// Notices (toasts) disappear after this long.
+const NOTICE_TTL: Duration = Duration::from_secs(6);
+const SEARCH_ID: &str = "people-search";
 
 // ---------------------------------------------------------------------------
 // config / boot
@@ -69,7 +72,27 @@ pub enum Tool {
     Select,
     AddPerson,
     Connect,
+    /// Click on the board to place a new (empty) clan.
     Clan,
+    /// Click people to add them to / remove them from the active clan.
+    Members,
+}
+
+/// Collapsible sidebar sections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Section {
+    Clans,
+    People,
+    Books,
+}
+
+/// Deletion waiting for confirmation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Confirm {
+    Person(Id),
+    Clan(Id),
+    /// The book page open in the editor.
+    Page,
 }
 
 #[derive(Debug, Clone)]
@@ -126,6 +149,13 @@ pub struct App {
     /// Person with unsaved text edits (flushed on submit / selection change / tick).
     pub dirty: Option<Id>,
     pub notice: Option<String>,
+    /// When the current notice appeared (it hides itself after [`NOTICE_TTL`]).
+    pub notice_at: Option<Instant>,
+    pub show_sidebar: bool,
+    pub collapsed: HashSet<Section>,
+    pub confirm: Option<Confirm>,
+    /// Last known window size (the board gets what the panels leave).
+    pub window: Size,
     /// Markdown editor shown in place of the board.
     pub note: Option<OpenNote>,
     /// Global documentation books found in `notes/books`.
@@ -144,14 +174,30 @@ pub enum Message {
     FitToWindow,
     Search(String),
     SearchSubmit,
+    FocusSearch,
+    ZoomStep(f32),
+    ZoomReset,
+    ToggleSidebar,
+    /// Handled by the shell (light / dark), not by the workspace.
+    ToggleTheme,
+    /// Single-key board shortcut; ignored while a note is open or a dialog is shown.
+    Shortcut(Box<Message>),
+    DismissNotice,
     // sidebar
     SelectPerson(Option<Id>),
     FocusPerson(Id),
     SelectClan(Id),
+    /// Opens a clan in the inspector (board click; never toggles).
+    ShowClan(Id),
+    DeselectClan,
     NewClan,
+    AddClanAt(Point),
+    ClanMoved(Id, [f32; 2]),
+    ToggleSection(Section),
+    AddPersonCentre,
     // clan inspector
     RenameClan(String),
-    CycleClanColor,
+    SetClanColor(usize),
     FitClan,
     DeleteClan,
     // board
@@ -177,6 +223,12 @@ pub enum Message {
     ConfirmLink,
     CancelLink,
     DeleteLink(Id),
+    EditLinkLabel(String),
+    SetLinkLabel(&'static str),
+    // confirmation
+    AskDelete(Confirm),
+    ConfirmDelete,
+    CancelDelete,
     // person inspector
     EditName(String),
     EditBorn(String),
@@ -209,6 +261,7 @@ pub enum Message {
     WindowResized(Size),
     Escape,
     DeleteKey,
+    EnterKey,
     Tick,
 }
 
@@ -245,10 +298,7 @@ impl App {
             routes: Routes::default(),
             clan_counts: HashMap::new(),
             camera: Camera::default(),
-            canvas_size: Size::new(
-                1440.0 - SIDEBAR_W - INSPECTOR_W,
-                900.0 - TOOLBAR_H - STATUS_H,
-            ),
+            canvas_size: Size::ZERO,
             cache: canvas::Cache::new(),
             tool: Tool::Select,
             selected: None,
@@ -260,6 +310,11 @@ impl App {
             pending_link: None,
             dirty: None,
             notice: None,
+            notice_at: None,
+            show_sidebar: true,
+            collapsed: HashSet::new(),
+            confirm: None,
+            window: Size::new(1440.0, 900.0),
             note: None,
             books: Vec::new(),
             with_notes: HashSet::new(),
@@ -270,6 +325,7 @@ impl App {
         app.with_notes
             .extend(notes::noted_ids(&app.cfg.project, "clans"));
         app.refresh_file_marks();
+        app.relayout();
         app.rebuild_all();
         app.fit_all();
         (app, Task::none())
@@ -294,14 +350,10 @@ impl App {
         let events = event::listen_with(|ev, status, _window| match ev {
             Event::Window(window::Event::FileDropped(path)) => Some(Message::FileDropped(path)),
             Event::Window(window::Event::Resized(size)) => Some(Message::WindowResized(size)),
-            Event::Keyboard(keyboard::Event::KeyPressed { key, .. })
+            Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
                 if status == event::Status::Ignored =>
             {
-                match key {
-                    keyboard::Key::Named(keyboard::key::Named::Escape) => Some(Message::Escape),
-                    keyboard::Key::Named(keyboard::key::Named::Delete) => Some(Message::DeleteKey),
-                    _ => None,
-                }
+                shortcut(&key, modifiers)
             }
             _ => None,
         });
@@ -309,6 +361,7 @@ impl App {
         let mut subs = vec![events];
         if self.db.pending() > 0
             || self.dirty.is_some()
+            || self.notice.is_some()
             || self.note.as_ref().is_some_and(|n| n.dirty)
         {
             subs.push(iced::time::every(Duration::from_millis(400)).map(|_| Message::Tick));
@@ -400,6 +453,34 @@ impl App {
         })
     }
 
+    /// Clan without members whose box contains `world`.
+    pub fn empty_clan_at(&self, world: Point) -> Option<Id> {
+        self.data
+            .clans
+            .iter()
+            .rev()
+            .filter(|c| self.clan_counts.get(&c.id).copied().unwrap_or(0) == 0)
+            .find(|c| c.box_rect().is_some_and(|r| r.contains(world)))
+            .map(|c| c.id.clone())
+    }
+
+    /// Board size = window minus toolbar, status bar and the visible panels.
+    fn relayout(&mut self) {
+        let side = if self.show_sidebar { SIDEBAR_W + 1.0 } else { 0.0 };
+        self.canvas_size = Size::new(
+            (self.window.width - side - INSPECTOR_W - 1.0).max(100.0),
+            (self.window.height - TOOLBAR_H - STATUS_H - 2.0).max(100.0),
+        );
+    }
+
+    /// Re-applies the palette to the open editor after a light / dark switch.
+    pub fn restyle(&mut self) {
+        if let Some(note) = &mut self.note {
+            note.editor.set_style(ui::editor_style());
+        }
+        self.cache.clear();
+    }
+
     fn fit_all(&mut self) {
         if let Some(bounds) = self.world_bounds() {
             self.camera.fit(bounds, self.canvas_size);
@@ -450,17 +531,27 @@ impl App {
     // -----------------------------------------------------------------------
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
-        let redraw = !matches!(message, Message::Tick | Message::Search(_));
+        let redraw = !matches!(
+            message,
+            Message::Tick | Message::Search(_) | Message::DismissNotice | Message::FocusSearch
+        );
         // camera-only messages never move cards or change lines
         let geometry = redraw
             && !matches!(
                 message,
                 Message::ZoomAt(..)
+                    | Message::ZoomStep(_)
+                    | Message::ZoomReset
                     | Message::PanBy(_)
                     | Message::FitToWindow
                     | Message::WindowResized(_)
+                    | Message::ToggleSidebar
             );
+        let notice = self.notice.clone();
         let task = self.handle(message);
+        if self.notice.is_some() && self.notice != notice {
+            self.notice_at = Some(Instant::now());
+        }
         if geometry {
             // incremental: only lines near moved cards or with edited inputs are re-routed
             self.routes.sync(&self.data);
@@ -478,7 +569,7 @@ impl App {
                 self.close_note();
                 self.tool = tool;
                 self.pending_link = None;
-                self.notice = (tool == Tool::Clan && self.active_clan.is_none()).then(|| {
+                self.notice = (tool == Tool::Members && self.active_clan.is_none()).then(|| {
                     t("Select a clan in the sidebar, then click people to add/remove them.").into()
                 });
             }
@@ -508,6 +599,40 @@ impl App {
                 self.fit_all();
             }
             Message::FitToWindow => self.fit_all(),
+            Message::ZoomStep(factor) => {
+                let centre = Point::new(self.canvas_size.width / 2.0, self.canvas_size.height / 2.0);
+                self.camera.zoom_at(centre, factor);
+            }
+            Message::ZoomReset => {
+                let centre = Point::new(self.canvas_size.width / 2.0, self.canvas_size.height / 2.0);
+                self.camera.zoom_at(centre, 1.0 / self.camera.zoom);
+            }
+            Message::ToggleSidebar => {
+                self.show_sidebar = !self.show_sidebar;
+                self.relayout();
+            }
+            Message::ToggleTheme => {}
+            Message::FocusSearch => return operation::focus(SEARCH_ID),
+            Message::Shortcut(msg) => {
+                if self.note.is_none() && self.confirm.is_none() && self.pending_link.is_none() {
+                    return self.handle(*msg);
+                }
+            }
+            Message::DismissNotice => {
+                self.notice = None;
+                self.notice_at = None;
+            }
+            Message::ToggleSection(section) => {
+                if !self.collapsed.remove(&section) {
+                    self.collapsed.insert(section);
+                }
+            }
+            Message::AddPersonCentre => {
+                self.close_note();
+                let centre = Point::new(self.canvas_size.width / 2.0, self.canvas_size.height / 2.0);
+                let world = self.camera.to_world(centre);
+                return self.handle(Message::AddPersonAt(world));
+            }
             Message::Search(query) => self.search = query,
             Message::SearchSubmit => {
                 let q = self.search.trim().to_lowercase();
@@ -562,6 +687,25 @@ impl App {
                 self.show_clan = false;
                 self.focus(&id);
             }
+            Message::SelectClan(id) if self.active_clan.as_ref() == Some(&id) => {
+                // clicking the active clan again deselects it
+                return self.handle(Message::DeselectClan);
+            }
+            Message::DeselectClan => {
+                self.active_clan = None;
+                self.show_clan = false;
+                if self.tool == Tool::Members {
+                    self.tool = Tool::Select;
+                }
+            }
+            Message::ShowClan(id) => {
+                self.flush_dirty();
+                self.close_note();
+                self.active_clan = Some(id);
+                self.show_clan = true;
+                self.selected = None;
+                self.selected_link = None;
+            }
             Message::SelectClan(id) => {
                 self.flush_dirty();
                 self.close_note();
@@ -572,13 +716,28 @@ impl App {
                 self.notice = None;
             }
             Message::NewClan => {
+                let centre = Point::new(self.canvas_size.width / 2.0, self.canvas_size.height / 2.0);
+                return self.handle(Message::AddClanAt(self.camera.to_world(centre)));
+            }
+            Message::ClanMoved(id, position) => {
+                if let Some(clan) = self.data.clan_mut(&id) {
+                    clan.position = Some(position);
+                }
+            }
+            Message::AddClanAt(world) => {
+                self.flush_dirty();
+                self.close_note();
                 let n = self.data.clans.len();
                 let clan = Clan {
                     id: new_id(),
                     name: tf("Clan {}", &[&(n + 1)]),
                     color: PALETTE[n % PALETTE.len()],
                     label_offset: [0.0, 0.0],
+                    position: Some([world.x - CLAN_BOX_W / 2.0, world.y - CLAN_BOX_H / 2.0]),
                 };
+                if self.tool == Tool::Clan {
+                    self.tool = Tool::Select;
+                }
                 self.db.send(Cmd::put(CLANS, &clan.id, &clan, true));
                 self.active_clan = Some(clan.id.clone());
                 self.show_clan = true;
@@ -596,15 +755,12 @@ impl App {
                     self.save_clan(&id);
                 }
             }
-            Message::CycleClanColor => {
+            Message::SetClanColor(i) => {
                 if let Some(id) = self.active_clan.clone()
                     && let Some(c) = self.data.clan_mut(&id)
+                    && let Some(color) = PALETTE.get(i)
                 {
-                    let next = PALETTE
-                        .iter()
-                        .position(|p| *p == c.color)
-                        .map_or(0, |i| (i + 1) % PALETTE.len());
-                    c.color = PALETTE[next];
+                    c.color = *color;
                     self.save_clan(&id);
                 }
             }
@@ -637,7 +793,7 @@ impl App {
                     self.hulls.remove(&id);
                     self.recount();
                     self.show_clan = false;
-                    if self.tool == Tool::Clan {
+                    if self.tool == Tool::Members {
                         self.tool = Tool::Select;
                     }
                 }
@@ -715,6 +871,9 @@ impl App {
             Message::ClanLabelDropped(id) => self.save_clan(&id),
             Message::AddPersonAt(world) => {
                 self.flush_dirty();
+                if let Some(id) = self.empty_clan_at(world) {
+                    self.active_clan = Some(id);
+                }
                 let person = Person {
                     id: new_id(),
                     name: t("New person").into(),
@@ -797,6 +956,34 @@ impl App {
                 }
             }
             Message::CancelLink => self.pending_link = None,
+            Message::EditLinkLabel(label) => {
+                if let Some(id) = self.selected_link.clone()
+                    && let Some(link) = self.data.links.iter_mut().find(|link| link.id == id)
+                {
+                    link.label = label;
+                    self.save_link(&id);
+                }
+            }
+            Message::SetLinkLabel(label) => return self.handle(Message::EditLinkLabel(label.into())),
+            Message::AskDelete(confirm) => self.confirm = Some(confirm),
+            Message::CancelDelete => self.confirm = None,
+            Message::ConfirmDelete => match self.confirm.take() {
+                Some(Confirm::Person(id)) => {
+                    self.selected = Some(id);
+                    return self.handle(Message::DeletePerson);
+                }
+                Some(Confirm::Clan(id)) => {
+                    self.active_clan = Some(id);
+                    return self.handle(Message::DeleteClan);
+                }
+                Some(Confirm::Page) => return self.handle(Message::DeleteNote),
+                None => {}
+            },
+            Message::EnterKey => {
+                if self.confirm.is_some() {
+                    return self.handle(Message::ConfirmDelete);
+                }
+            }
             Message::DeleteLink(id) => {
                 self.data.links.retain(|l| l.id != id);
                 self.db.send(Cmd::del(LINKS, &id));
@@ -815,6 +1002,7 @@ impl App {
                     self.delete_person(&id);
                 }
             }
+            Message::DeleteKey if self.confirm.is_some() || self.note.is_some() => {}
             Message::DeleteKey => {
                 if let (Some(id), Some(vertex)) =
                     (self.selected_link.clone(), self.selected_link_vertex.take())
@@ -833,8 +1021,8 @@ impl App {
                 } else if let Some(id) = self.selected_link.take() {
                     self.data.links.retain(|link| link.id != id);
                     self.db.send(Cmd::del(LINKS, &id));
-                } else if let Some(id) = self.selected.take() {
-                    self.delete_person(&id);
+                } else if let Some(id) = self.selected.clone() {
+                    self.confirm = Some(Confirm::Person(id));
                 }
             }
             Message::AddToClan(choice) => {
@@ -909,26 +1097,35 @@ impl App {
             }
 
             Message::WindowResized(size) => {
-                self.canvas_size = Size::new(
-                    (size.width - SIDEBAR_W - INSPECTOR_W).max(100.0),
-                    (size.height - TOOLBAR_H - STATUS_H).max(100.0),
-                );
+                self.window = size;
+                self.relayout();
             }
             Message::Escape => {
-                if self.pending_link.take().is_none() {
+                if self.confirm.take().is_some() {
+                } else if self.pending_link.take().is_none() {
                     if self.tool != Tool::Select {
                         self.tool = Tool::Select;
-                    } else {
+                    } else if self.selected.is_some()
+                        || self.selected_link.is_some()
+                        || self.show_clan
+                    {
                         self.flush_dirty();
                         self.selected = None;
                         self.selected_link = None;
                         self.show_clan = false;
+                    } else {
+                        // nothing left to deselect: new people go to no clan
+                        self.active_clan = None;
                     }
                 }
             }
             Message::Tick => {
                 self.flush_dirty();
                 self.flush_note();
+                if self.notice_at.is_some_and(|at| at.elapsed() >= NOTICE_TTL) {
+                    self.notice = None;
+                    self.notice_at = None;
+                }
             }
             Message::OpenSettings(_) => {}
 
@@ -1197,40 +1394,205 @@ impl App {
     // -----------------------------------------------------------------------
 
     pub fn view(&self) -> Element<'_, Message> {
-        let body = row![
-            self.view_sidebar(),
-            vline(),
-            self.view_centre(),
-            vline(),
-            self.view_inspector(),
-        ]
-        .height(Length::Fill);
+        let mut body = Row::new().height(Length::Fill);
+        if self.show_sidebar {
+            body = body.push(self.view_sidebar()).push(vline());
+        }
+        let body = body
+            .push(self.view_centre())
+            .push(vline())
+            .push(self.view_inspector());
 
-        column![
+        let page = column![
             self.view_toolbar(),
             hline(),
             body,
             hline(),
             self.view_status()
-        ]
+        ];
+
+        match &self.confirm {
+            Some(confirm) => stack![page, opaque(self.view_confirm(confirm))].into(),
+            None => page.into(),
+        }
+    }
+
+    /// Board (or the open note) with floating overlays: tool hint, zoom, toast, empty state.
+    fn view_centre(&self) -> Element<'_, Message> {
+        if let Some(note) = &self.note {
+            return self.view_note(note);
+        }
+
+        let mut layers = stack![
+            canvas(Board { app: self })
+                .width(Length::Fill)
+                .height(Length::Fill)
+        ];
+
+        if self.data.people.is_empty() && self.data.clans.is_empty() {
+            layers = layers.push(container(self.view_empty_board()).center(Length::Fill));
+        }
+        if let Some(hint) = self.tool_hint() {
+            layers = layers.push(
+                container(
+                    container(
+                        row![
+                            text(hint).size(13),
+                            kbd("Esc"),
+                        ]
+                        .spacing(10)
+                        .align_y(alignment::Vertical::Center),
+                    )
+                    .padding([7, 14])
+                    .style(ui::tooltip),
+                )
+                .width(Length::Fill)
+                .align_x(alignment::Horizontal::Center)
+                .padding(14),
+            );
+        }
+        layers = layers.push(
+            container(self.view_zoom())
+                .align_right(Length::Fill)
+                .align_bottom(Length::Fill)
+                .padding(14),
+        );
+        if let Some(notice) = &self.notice {
+            layers = layers.push(
+                container(
+                    container(
+                        row![
+                            text(notice.as_str())
+                                .size(13)
+                                .color(ui::toast_text()),
+                            button(icon("✕").size(12).color(ui::toast_text()))
+                                .padding([2, 6])
+                                .style(ui::ghost)
+                                .on_press(Message::DismissNotice),
+                        ]
+                        .spacing(12)
+                        .align_y(alignment::Vertical::Center),
+                    )
+                    .max_width(560)
+                    .padding([8, 10])
+                    .style(ui::toast),
+                )
+                .width(Length::Fill)
+                .align_x(alignment::Horizontal::Center)
+                .align_bottom(Length::Fill)
+                .padding([18, 80]),
+            );
+        }
+        layers.width(Length::Fill).height(Length::Fill).into()
+    }
+
+    fn tool_hint(&self) -> Option<String> {
+        if self.pending_link.is_some() {
+            return Some(t("Name the new line in the panel on the right").into());
+        }
+        let clan = self
+            .active_clan
+            .as_deref()
+            .and_then(|id| self.data.clan(id))
+            .map(|c| c.name.as_str());
+        match (self.tool, clan) {
+            (Tool::Select, _) => None,
+            (Tool::AddPerson, Some(clan)) => Some(tf(
+                "Click anywhere on the board to place a person in {}",
+                &[&clan],
+            )),
+            (Tool::AddPerson, None) => {
+                Some(t("Click anywhere on the board to place a person").into())
+            }
+            (Tool::Connect, _) => {
+                Some(t("Drag from one person onto another to connect them").into())
+            }
+            (Tool::Clan, _) => Some(t("Click on the board to place a new clan").into()),
+            (Tool::Members, Some(clan)) => Some(tf(
+                "Click people to add them to or remove them from {}",
+                &[&clan],
+            )),
+            (Tool::Members, None) => Some(t("Pick a clan first").into()),
+        }
+    }
+
+    fn view_zoom(&self) -> Element<'_, Message> {
+        let step = |glyph: &'static str, msg: Message, label: &'static str| {
+            tip(
+                button(icon(glyph).size(15))
+                    .padding([4, 10])
+                    .style(ui::icon)
+                    .on_press(msg),
+                label,
+            )
+        };
+        container(
+            row![
+                step("−", Message::ZoomStep(1.0 / 1.25), t("Zoom out (−)")),
+                tip(
+                    button(
+                        text(format!("{:.0}%", self.camera.zoom * 100.0))
+                            .size(12)
+                            .width(Length::Fixed(44.0))
+                            .align_x(alignment::Horizontal::Center),
+                    )
+                    .padding([5, 2])
+                    .style(ui::icon)
+                    .on_press(Message::ZoomReset),
+                    t("Reset to 100% (0)"),
+                ),
+                step("+", Message::ZoomStep(1.25), t("Zoom in (+)")),
+                vrule(18.0),
+                step("⊡", Message::FitToWindow, t("Fit to window (F)")),
+            ]
+            .spacing(2)
+            .align_y(alignment::Vertical::Center),
+        )
+        .padding(4)
+        .style(ui::floating)
         .into()
     }
 
-    fn view_centre(&self) -> Element<'_, Message> {
-        let Some(note) = &self.note else {
-            return canvas(Board { app: self })
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into();
-        };
+    fn view_empty_board(&self) -> Element<'_, Message> {
+        container(
+            column![
+                text("✦").font(ui::ICON).size(30).color(ui::pal().accent),
+                text(t("Start your family board")).size(20).font(ui::BOLD),
+                text(t(
+                    "Add the first person, then connect relatives and group them into clans."
+                ))
+                .size(13)
+                .color(ui::pal().muted)
+                .align_x(alignment::Horizontal::Center),
+                row![
+                    button(icon_label("✚", t("Add person")))
+                        .padding([8, 16])
+                        .style(ui::primary)
+                        .on_press(Message::AddPersonCentre),
+                    button(icon_label("◎", t("New clan")))
+                        .padding([8, 16])
+                        .style(ui::secondary)
+                        .on_press(Message::NewClan),
+                ]
+                .spacing(10),
+            ]
+            .spacing(12)
+            .align_x(alignment::Horizontal::Center),
+        )
+        .width(Length::Fixed(400.0))
+        .padding(28)
+        .style(ui::floating)
+        .into()
+    }
 
+    fn view_note<'a>(&'a self, note: &'a OpenNote) -> Element<'a, Message> {
         let mut header = row![
-            button(text(t("← Board")).size(13))
+            button(icon_label("←", t("Back to board")))
                 .padding([6, 12])
-                .style(ui::tool(false))
+                .style(ui::secondary)
                 .on_press(Message::CloseNote),
         ]
-        .spacing(8)
+        .spacing(10)
         .align_y(alignment::Vertical::Center);
 
         if matches!(note.key, NoteKey::Page { .. }) {
@@ -1240,39 +1602,45 @@ impl App {
                         .on_input(Message::BookName)
                         .on_submit(Message::RenameBook)
                         .size(14)
-                        .padding(6)
+                        .padding([6, 10])
+                        .style(ui::input)
                         .width(Length::Fixed(200.0)),
                 )
-                .push(text("/").size(14).color(ui::MUTED))
+                .push(text("/").size(16).color(ui::pal().subtle))
                 .push(
                     text_input(t("Page name"), &note.name)
                         .on_input(Message::NoteName)
                         .on_submit(Message::RenameNote)
                         .size(14)
-                        .padding(6)
+                        .padding([6, 10])
+                        .style(ui::input)
                         .width(Length::Fixed(260.0)),
                 )
+                .push(space::horizontal())
                 .push(
-                    button(text(t("Delete page")).size(13))
+                    button(icon_label("✕", t("Delete page")))
                         .padding([6, 12])
                         .style(ui::danger)
-                        .on_press(Message::DeleteNote),
+                        .on_press(Message::AskDelete(Confirm::Page)),
                 );
         } else {
-            header = header.push(
-                text(tf("Notes · {}", &[&self.note_title(&note.key)]))
-                    .size(15)
-                    .font(Font {
-                        weight: Weight::Bold,
-                        ..Font::default()
-                    }),
-            );
+            header = header
+                .push(icon("✎").size(15).color(ui::pal().note_mark))
+                .push(
+                    text(tf("Notes · {}", &[&self.note_title(&note.key)]))
+                        .size(15)
+                        .font(ui::BOLD),
+                );
         }
+        let saved = if note.dirty { t("Saving…") } else { t("Saved") };
+        header = header.push(space::horizontal()).push(
+            text(saved).size(12).color(ui::pal().subtle),
+        );
 
         column![
-            container(header.padding([8, 12]))
+            container(header.padding([10, 14]))
                 .width(Length::Fill)
-                .style(ui::panel),
+                .style(ui::chrome),
             hline(),
             markdown_editor(&note.editor)
                 .status_bar(false)
@@ -1284,79 +1652,203 @@ impl App {
         .into()
     }
 
-    /// Small "N" (has notes) / "F" (has files) markers for list rows.
+    /// Small note / file indicators for list rows.
     fn marks(&self, id: &str, files: bool) -> Element<'_, Message> {
-        let mut r = Row::new().spacing(4);
+        let mut r = Row::new().spacing(5).align_y(alignment::Vertical::Center);
         if self.with_notes.contains(id) {
-            r = r.push(text(t("N")).size(11).color(ui::NOTE_MARK));
+            r = r.push(icon("✎").size(11).color(ui::pal().note_mark));
         }
         if files && self.with_files.contains(id) {
-            r = r.push(text(t("F")).size(11).color(ui::FILE_MARK));
+            r = r.push(icon("▣").size(11).color(ui::pal().file_mark));
         }
         r.into()
     }
 
     fn view_toolbar(&self) -> Element<'_, Message> {
-        let tool = |label: &'static str, t: Tool| {
-            button(text(label).size(13))
-                .padding([6, 12])
-                .style(ui::tool(self.tool == t))
-                .on_press(Message::Tool(t))
+        let segment = |glyph: &'static str, label: &'static str, key: &'static str, tool: Tool| {
+            tip_key(
+                button(icon_label(glyph, label))
+                    .padding([5, 11])
+                    .style(ui::segment(self.tool == tool))
+                    .on_press(Message::Tool(tool)),
+                label,
+                key,
+            )
         };
-        let action = |label: &'static str, msg: Message| {
-            button(text(label).size(13))
-                .padding([6, 12])
-                .style(ui::tool(false))
-                .on_press(msg)
-        };
+        let tools = container(
+            row![
+                segment("↖", t("Select"), "V", Tool::Select),
+                segment("◎", t("Clan"), "G", Tool::Clan),
+                segment("✚", t("Person"), "P", Tool::AddPerson),
+                segment("⟶", t("Connect"), "C", Tool::Connect),
+            ]
+            .spacing(2),
+        )
+        .padding(3)
+        .style(ui::segments);
 
-        let tools = row![
-            tool(t("Select"), Tool::Select),
-            tool(t("+ Person"), Tool::AddPerson),
-            tool(t("Connect"), Tool::Connect),
-            tool(t("Clan"), Tool::Clan),
-            text("|").size(16).color(ui::BORDER),
-            action(t("Auto-layout"), Message::AutoLayout),
-            action(t("Fit to window"), Message::FitToWindow),
+        let actions = row![
+            tip(
+                button(icon_label("▦", t("Auto-layout")))
+                    .padding([6, 11])
+                    .style(ui::icon)
+                    .on_press(Message::AutoLayout),
+                t("Arrange everyone by generation and clan"),
+            ),
+            tip_key(
+                button(icon_label("⊡", t("Fit")))
+                    .padding([6, 11])
+                    .style(ui::icon)
+                    .on_press(Message::FitToWindow),
+                t("Fit to window"),
+                "F",
+            ),
         ]
-        .spacing(6)
-        .align_y(alignment::Vertical::Center);
+        .spacing(2);
 
-        let search = text_input(t("Search people…"), &self.search)
+        let sidebar = tip_key(
+            button(icon("◧").size(16))
+                .padding([5, 9])
+                .style(ui::icon)
+                .on_press(Message::ToggleSidebar),
+            if self.show_sidebar {
+                t("Hide sidebar")
+            } else {
+                t("Show sidebar")
+            },
+            "Ctrl+B",
+        );
+        let workspace = tip(
+            button(
+                row![
+                    icon("▤").size(14).color(ui::pal().accent),
+                    text(self.workspace_name()).size(14).font(ui::SEMIBOLD),
+                    icon("▾").size(11).color(ui::pal().muted),
+                ]
+                .spacing(8)
+                .align_y(alignment::Vertical::Center),
+            )
+            .padding([6, 10])
+            .style(ui::icon)
+            .on_press(Message::OpenSettings(SettingsPage::Workspace)),
+            t("Switch or create workspaces"),
+        );
+
+        let search = text_input(t("Search people…  Ctrl+F"), &self.search)
+            .id(SEARCH_ID)
             .on_input(Message::Search)
             .on_submit(Message::SearchSubmit)
             .size(13)
-            .padding(6)
-            .width(Length::Fixed(260.0));
+            .padding([7, 14])
+            .style(ui::search)
+            .width(Length::Fixed(240.0));
 
-        let workspace = button(text(format!("▤ {}", self.workspace_name())).size(13))
-            .padding([6, 12])
-            .style(ui::tool(false))
-            .on_press(Message::OpenSettings(SettingsPage::Workspace));
-        let settings = button(text(t("Settings")).size(13))
-            .padding([6, 12])
-            .style(ui::tool(false))
-            .on_press(Message::OpenSettings(SettingsPage::General));
+        let theme = tip(
+            button(icon(if ui::pal().dark { "☀" } else { "☾" }).size(15))
+                .padding([5, 9])
+                .style(ui::icon)
+                .on_press(Message::ToggleTheme),
+            if ui::pal().dark {
+                t("Light mode")
+            } else {
+                t("Dark mode")
+            },
+        );
+        let settings = tip_key(
+            button(icon("⚙").size(16))
+                .padding([4, 9])
+                .style(ui::icon)
+                .on_press(Message::OpenSettings(SettingsPage::General)),
+            t("Settings"),
+            "Ctrl+,",
+        );
 
         container(
             row![
-                container(tools).width(Length::Fill),
-                search,
+                sidebar,
                 workspace,
-                settings
+                vrule(22.0),
+                tools,
+                actions,
+                space::horizontal(),
+                search,
+                theme,
+                settings,
             ]
             .spacing(8)
             .align_y(alignment::Vertical::Center)
-            .padding([8, 12]),
+            .padding([0, 10]),
         )
         .width(Length::Fill)
         .height(Length::Fixed(TOOLBAR_H))
-        .style(ui::panel)
+        .align_y(alignment::Vertical::Center)
+        .style(ui::chrome)
         .into()
     }
 
+    /// Collapsible sidebar section header with a count and an optional add button.
+    fn section_header(
+        &self,
+        section: Section,
+        label: &'static str,
+        count: usize,
+        add: Option<(Message, &'static str)>,
+    ) -> Element<'_, Message> {
+        let open = !self.collapsed.contains(&section);
+        let mut header = row![
+            button(
+                row![
+                    icon(if open { "▾" } else { "▸" })
+                        .size(11)
+                        .color(ui::pal().subtle)
+                        .width(Length::Fixed(12.0)),
+                    caption(label),
+                    badge(count),
+                ]
+                .spacing(6)
+                .align_y(alignment::Vertical::Center),
+            )
+            .width(Length::Fill)
+            .padding([5, 6])
+            .style(ui::header)
+            .on_press(Message::ToggleSection(section)),
+        ]
+        .spacing(2)
+        .align_y(alignment::Vertical::Center);
+        if let Some((msg, label)) = add {
+            header = header.push(tip(
+                button(icon("+").size(15))
+                    .padding([1, 8])
+                    .style(ui::icon)
+                    .on_press(msg),
+                label,
+            ));
+        }
+        header.into()
+    }
+
+    /// Scrollable list of a sidebar section (nothing when collapsed).
+    /// Scrollable list of a sidebar section (nothing when collapsed); `max` caps short
+    /// sections at their content height, without a cap the section takes the free space.
+    fn section_body<'a>(
+        &self,
+        section: Section,
+        list: Column<'a, Message>,
+        max: Option<f32>,
+    ) -> Element<'a, Message> {
+        if self.collapsed.contains(&section) {
+            return Column::new().into();
+        }
+        let list = scrollable(list.padding(Padding::ZERO.right(8))).style(ui::scroll);
+        match max {
+            Some(max) => container(list.height(Length::Shrink)).max_height(max).into(),
+            None => list.height(Length::Fill).into(),
+        }
+    }
+
     fn view_sidebar(&self) -> Element<'_, Message> {
-        let mut clans = Column::new().spacing(2);
+        // clans
+        let mut clans = Column::new().spacing(1);
         for clan in &self.data.clans {
             let count = self.clan_counts.get(&clan.id).copied().unwrap_or(0);
             let active = self.active_clan.as_deref() == Some(clan.id.as_str());
@@ -1365,38 +1857,112 @@ impl App {
                     .width(Length::Fixed(10.0))
                     .height(Length::Fixed(10.0))
                     .style(ui::swatch(clan.color())),
-                text(clan.name.as_str()).size(13).width(Length::Fill),
-                self.marks(&clan.id, false),
-                text(count.to_string()).size(12).color(ui::MUTED),
-            ]
-            .spacing(8)
-            .align_y(alignment::Vertical::Center);
-            clans = clans.push(
-                button(content)
+                text(clan.name.as_str())
+                    .size(13)
                     .width(Length::Fill)
-                    .padding([4, 8])
-                    .style(ui::list_item(active))
-                    .on_press(Message::SelectClan(clan.id.clone())),
-            );
+                    .wrapping(text::Wrapping::None),
+                self.marks(&clan.id, false),
+                text(count.to_string()).size(12).color(ui::pal().subtle),
+            ]
+            .spacing(10)
+            .align_y(alignment::Vertical::Center);
+            let row = button(content)
+                .width(Length::Fill)
+                .padding([6, 10])
+                .style(ui::list_item(active))
+                .on_press(Message::SelectClan(clan.id.clone()));
+            clans = clans.push(if active {
+                Element::from(
+                    row![
+                        row,
+                        tip(
+                            button(icon("✕").size(11))
+                                .padding([4, 7])
+                                .style(ui::ghost)
+                                .on_press(Message::DeselectClan),
+                            t("Deselect clan – new people join no clan"),
+                        ),
+                    ]
+                    .spacing(2)
+                    .align_y(alignment::Vertical::Center),
+                )
+            } else {
+                row.into()
+            });
         }
-        clans = clans.push(
-            button(text(t("+ New clan")).size(13))
-                .padding([4, 8])
-                .style(ui::link)
-                .on_press(Message::NewClan),
-        );
+        if self.data.clans.is_empty() {
+            clans = clans.push(empty_hint(t("No clans yet.")));
+        }
+        clans = clans.push(add_row(t("New clan"), Message::NewClan));
 
-        let mut books = Column::new().spacing(2);
+        // people
+        let q = self.search.trim().to_lowercase();
+        let mut people = Column::new().spacing(1);
+        let mut total = 0usize;
+        for p in &self.data.people {
+            if !q.is_empty() && !p.name.to_lowercase().contains(&q) {
+                continue;
+            }
+            total += 1;
+            if total <= MAX_PEOPLE_LIST {
+                let active = self.selected.as_deref() == Some(p.id.as_str());
+                let years = p.years();
+                let mut name = Column::new().push(
+                    text(p.name.as_str())
+                        .size(13)
+                        .wrapping(text::Wrapping::None),
+                );
+                if !years.is_empty() {
+                    name = name.push(text(years).size(11).color(ui::pal().subtle));
+                }
+                people = people.push(
+                    button(
+                        row![
+                            avatar(&p.name, self.person_color(p), 26.0),
+                            name.width(Length::Fill),
+                            self.marks(&p.id, true),
+                        ]
+                        .spacing(10)
+                        .align_y(alignment::Vertical::Center),
+                    )
+                    .width(Length::Fill)
+                    .padding([5, 8])
+                    .style(ui::list_item(active))
+                    .on_press(Message::FocusPerson(p.id.clone())),
+                );
+            }
+        }
+        if total > MAX_PEOPLE_LIST {
+            people = people.push(empty_hint(&tf(
+                "… {} more - use search",
+                &[&(total - MAX_PEOPLE_LIST)],
+            )));
+        } else if total == 0 && !q.is_empty() {
+            people = people.push(empty_hint(t("Nobody matches your search.")));
+        } else if total == 0 {
+            people = people.push(empty_hint(t("No people yet.")));
+        }
+
+        // books
+        let mut books = Column::new().spacing(1);
         for book in &self.books {
             books = books.push(
                 row![
-                    text(book.name.as_str()).size(13).width(Length::Fill),
-                    button(text(t("+ page")).size(12))
-                        .padding([2, 6])
-                        .style(ui::ghost)
-                        .on_press(Message::NewPage(book.name.clone())),
+                    icon("▤").size(12).color(ui::pal().muted),
+                    text(book.name.as_str())
+                        .size(13)
+                        .font(ui::SEMIBOLD)
+                        .width(Length::Fill),
+                    tip(
+                        button(icon("+").size(13))
+                            .padding([0, 7])
+                            .style(ui::icon)
+                            .on_press(Message::NewPage(book.name.clone())),
+                        t("New page"),
+                    ),
                 ]
-                .padding([2, 8])
+                .spacing(8)
+                .padding([4, 10])
                 .align_y(alignment::Vertical::Center),
             );
             for page in &book.pages {
@@ -1406,70 +1972,62 @@ impl App {
                 };
                 let active = self.note.as_ref().is_some_and(|n| n.key == key);
                 books = books.push(
-                    button(text(page.as_str()).size(13))
-                        .width(Length::Fill)
-                        .padding([3, 20])
-                        .style(ui::list_item(active))
-                        .on_press(Message::OpenNote(key)),
-                );
-            }
-        }
-        books = books.push(
-            button(text(t("+ New book")).size(13))
-                .padding([4, 8])
-                .style(ui::link)
-                .on_press(Message::NewBook),
-        );
-
-        let q = self.search.trim().to_lowercase();
-        let mut people = Column::new().spacing(2);
-        let mut total = 0usize;
-        for p in &self.data.people {
-            if !q.is_empty() && !p.name.to_lowercase().contains(&q) {
-                continue;
-            }
-            total += 1;
-            if total <= MAX_PEOPLE_LIST {
-                let active = self.selected.as_deref() == Some(p.id.as_str());
-                people = people.push(
                     button(
                         row![
-                            text(p.name.as_str()).size(13).width(Length::Fill),
-                            self.marks(&p.id, true),
+                            icon("✎").size(11).color(ui::pal().subtle),
+                            text(page.as_str()).size(13),
                         ]
+                        .spacing(8)
                         .align_y(alignment::Vertical::Center),
                     )
-                        .width(Length::Fill)
-                        .padding([4, 8])
-                        .style(ui::list_item(active))
-                        .on_press(Message::FocusPerson(p.id.clone())),
+                    .width(Length::Fill)
+                    .padding(Padding::from([4, 10]).left(30))
+                    .style(ui::list_item(active))
+                    .on_press(Message::OpenNote(key)),
                 );
             }
         }
-        if total > MAX_PEOPLE_LIST {
-            people = people.push(
-                text(tf("… {} more - use search", &[&(total - MAX_PEOPLE_LIST)]))
-                    .size(12)
-                    .color(ui::MUTED),
-            );
-        }
+        books = books.push(add_row(t("New book"), Message::NewBook));
 
-        container(
-            column![
-                section(t("CLANS")),
-                scrollable(clans).height(Length::FillPortion(1)),
-                section(t("PEOPLE")),
-                scrollable(people).height(Length::FillPortion(2)),
-                section(t("BOOKS")),
-                scrollable(books).height(Length::FillPortion(1)),
-            ]
-            .spacing(8),
-        )
-        .padding(12)
-        .width(Length::Fixed(SIDEBAR_W))
-        .height(Length::Fill)
-        .style(ui::panel)
-        .into()
+        let col = column![
+            self.section_header(
+                Section::Clans,
+                t("CLANS"),
+                self.data.clans.len(),
+                Some((Message::NewClan, t("New clan"))),
+            ),
+            self.section_body(Section::Clans, clans, Some(220.0)),
+            self.section_header(
+                Section::People,
+                t("PEOPLE"),
+                self.data.people.len(),
+                Some((Message::AddPersonCentre, t("Add person"))),
+            ),
+            self.section_body(Section::People, people, None),
+            self.section_header(
+                Section::Books,
+                t("BOOKS"),
+                self.books.len(),
+                Some((Message::NewBook, t("New book"))),
+            ),
+            self.section_body(Section::Books, books, Some(200.0)),
+        ]
+        .spacing(4);
+
+        container(col)
+            .padding([10, 8])
+            .width(Length::Fixed(SIDEBAR_W))
+            .height(Length::Fill)
+            .style(ui::panel)
+            .into()
+    }
+
+    /// Colour shown for a person: their first clan, else neutral.
+    fn person_color(&self, p: &Person) -> Color {
+        p.clans
+            .first()
+            .and_then(|c| self.data.clan(c))
+            .map_or(ui::pal().subtle, |c| c.color())
     }
 
     fn view_inspector(&self) -> Element<'_, Message> {
@@ -1491,120 +2049,298 @@ impl App {
         {
             self.view_clan(c)
         } else {
-            column![
-                section(t("WURZELWERK")),
-                hint(t("Click a person to edit details, clans, lines and files.")),
-                hint(t("+ Person: click on the board to place someone.")),
-                hint(t("Connect: drag from a person (or a handle of the selected person) onto another person, then name the line.")),
-                hint(t("Select: drag a line label to move it, or drag a line segment to add/move a bend.")),
-                hint(t("Clan: pick a clan on the left, then click people to add or remove them.")),
-                hint(t("Wheel = zoom · drag empty space / right mouse = pan · select a line then Delete to remove it, or select a person to delete them.")),
-            ]
-            .spacing(10)
-            .into()
+            self.view_guide()
         };
 
-        container(scrollable(container(content).padding(16)).height(Length::Fill))
-            .width(Length::Fixed(INSPECTOR_W))
-            .height(Length::Fill)
-            .style(ui::panel)
-            .into()
+        container(
+            scrollable(container(content).padding(Padding::from(16).right(20)))
+                .style(ui::scroll)
+                .height(Length::Fill),
+        )
+        .width(Length::Fixed(INSPECTOR_W))
+        .height(Length::Fill)
+        .style(ui::panel)
+        .into()
+    }
+
+    /// Inspector with nothing selected: quick start and keyboard shortcuts.
+    fn view_guide(&self) -> Element<'_, Message> {
+        let step = |glyph: &'static str, title: &'static str, body: &'static str| {
+            row![
+                container(icon(glyph).size(14).color(ui::pal().accent))
+                    .center(Length::Fixed(30.0))
+                    .style(ui::avatar(ui::pal().accent)),
+                column![
+                    text(title).size(13).font(ui::SEMIBOLD),
+                    text(body).size(12).color(ui::pal().muted),
+                ]
+                .spacing(2)
+                .width(Length::Fill),
+            ]
+            .spacing(12)
+        };
+        let shortcut = |keys: &'static str, label: &'static str| {
+            row![
+                text(label).size(12).color(ui::pal().muted).width(Length::Fill),
+                kbd(keys),
+            ]
+            .align_y(alignment::Vertical::Center)
+        };
+
+        column![
+            column![
+                text(t("Nothing selected")).size(17).font(ui::BOLD),
+                text(t("Select a person, line or clan to see and edit its details here."))
+                    .size(13)
+                    .color(ui::pal().muted),
+            ]
+            .spacing(4),
+            card(
+                t("GETTING STARTED"),
+                column![
+                    step(
+                        "✚",
+                        t("Add people"),
+                        t("+ Person: click on the board to place someone."),
+                    ),
+                    step(
+                        "⟶",
+                        t("Connect relatives"),
+                        t("Connect: drag from a person (or a handle of the selected person) onto another person, then name the line."),
+                    ),
+                    step(
+                        "◎",
+                        t("Group into clans"),
+                        t("Clan: click on the board to place a clan, then use + Person inside its box. New people join the clan selected on the left; click it again for no clan."),
+                    ),
+                    step(
+                        "↖",
+                        t("Shape the lines"),
+                        t("Select: drag a line label to move it, or drag a line segment to add/move a bend."),
+                    ),
+                ]
+                .spacing(14),
+            ),
+            card(
+                t("KEYBOARD"),
+                column![
+                    shortcut("V", t("Select")),
+                    shortcut("G", t("Add clan")),
+                    shortcut("P", t("Add person")),
+                    shortcut("C", t("Connect")),
+                    shortcut("F", t("Fit to window")),
+                    shortcut("+ / −", t("Zoom in / out")),
+                    shortcut("Ctrl+F", t("Search people")),
+                    shortcut("Del", t("Delete selection")),
+                    shortcut("Esc", t("Cancel / deselect")),
+                    shortcut(t("Wheel"), t("Zoom")),
+                    shortcut(t("Drag empty space"), t("Pan")),
+                ]
+                .spacing(7),
+            ),
+        ]
+        .spacing(16)
+        .into()
     }
 
     fn view_pending_link(&self, pl: &PendingLink) -> Element<'_, Message> {
-        let name = |id: &str| {
-            self.data
-                .person(id)
-                .map(|p| p.name.clone())
-                .unwrap_or_default()
-        };
         let presets = Row::with_children(LINK_PRESETS.iter().map(|&label| {
             button(text(label).size(12))
-                .padding([3, 10])
-                .style(ui::card)
+                .padding([4, 10])
+                .style(ui::chip(ui::pal().accent))
                 .on_press(Message::LinkPreset(label))
                 .into()
         }))
         .spacing(6)
-        .wrap();
+        .wrap()
+        .vertical_spacing(6);
 
         column![
-            section(t("NAME THE LINE")),
-            text(format!("{} → {}", name(&pl.from), name(&pl.to))).size(14),
-            text_input(t("e.g. godfather of"), &pl.label)
-                .on_input(Message::LinkLabel)
-                .on_submit(Message::ConfirmLink)
-                .padding(6)
-                .size(13),
-            presets,
+            column![
+                caption(t("NAME THE LINE")),
+                self.link_ends(&pl.from, &pl.to),
+            ]
+            .spacing(10),
+            card(
+                t("RELATIONSHIP"),
+                column![
+                    text_input(t("e.g. godfather of"), &pl.label)
+                        .on_input(Message::LinkLabel)
+                        .on_submit(Message::ConfirmLink)
+                        .padding([8, 10])
+                        .size(13)
+                        .style(ui::input),
+                    hint(t("Or pick a common one:")),
+                    presets,
+                ]
+                .spacing(10),
+            ),
             row![
-                button(text(t("Create line")).size(13))
-                    .style(ui::tool(true))
-                    .padding([6, 12])
+                button(icon_label("✓", t("Create line")))
+                    .style(ui::primary)
+                    .padding([7, 14])
                     .on_press(Message::ConfirmLink),
                 button(text(t("Cancel")).size(13))
-                    .style(ui::tool(false))
-                    .padding([6, 12])
+                    .style(ui::secondary)
+                    .padding([7, 14])
                     .on_press(Message::CancelLink),
             ]
             .spacing(8),
         ]
-        .spacing(10)
+        .spacing(16)
+        .into()
+    }
+
+    /// `[avatar] name → [avatar] name` for a line.
+    fn link_ends(&self, from: &str, to: &str) -> Element<'_, Message> {
+        let end = |id: &str| -> Element<'_, Message> {
+            match self.data.person(id) {
+                Some(p) => button(
+                    row![
+                        avatar(&p.name, self.person_color(p), 24.0),
+                        text(p.name.clone())
+                            .size(13)
+                            .font(ui::SEMIBOLD)
+                            .wrapping(text::Wrapping::WordOrGlyph),
+                    ]
+                    .spacing(8)
+                    .align_y(alignment::Vertical::Center),
+                )
+                .padding([6, 8])
+                .width(Length::Fill)
+                .style(ui::card)
+                .on_press(Message::FocusPerson(p.id.clone()))
+                .into(),
+                None => text(t("Missing person")).size(13).color(ui::pal().danger).into(),
+            }
+        };
+        column![
+            end(from),
+            container(icon("↓").size(14).color(ui::pal().subtle)).padding([0, 16]),
+            end(to),
+        ]
+        .spacing(4)
         .into()
     }
 
     fn view_link(&self, link: &Link) -> Element<'_, Message> {
-        let from = self
-            .data
-            .person(&link.from)
-            .map(|person| person.name.clone())
-            .unwrap_or_else(|| t("Missing person").into());
-        let to = self
-            .data
-            .person(&link.to)
-            .map(|person| person.name.clone())
-            .unwrap_or_else(|| t("Missing person").into());
-        let mut controls = Column::new().spacing(10).push(section(t("SELECTED LINE")));
-        controls = controls
-            .push(text(format!("{from}  →  {to}")).size(14))
-            .push(text(link.label.clone()).size(13).color(ui::MUTED))
+        let presets = Row::with_children(LINK_PRESETS.iter().map(|&label| {
+            let active = link.label == label;
+            button(text(label).size(12))
+                .padding([4, 10])
+                .style(if active {
+                    ui::chip(ui::pal().accent)
+                } else {
+                    ui::chip(ui::pal().subtle)
+                })
+                .on_press(Message::SetLinkLabel(label))
+                .into()
+        }))
+        .spacing(6)
+        .wrap()
+        .vertical_spacing(6);
+
+        let mut route = Column::new()
+            .spacing(10)
             .push(hint(t("Drag a label to move it or drag a segment to reshape the route.")));
         if let Some(vertex) = self.selected_link_vertex {
-            controls = controls
+            route = route
                 .push(hint(t("Selected corner: press Delete or remove it below.")))
                 .push(
-                    button(text(t("Remove selected corner")).size(13))
+                    button(icon_label("✕", t("Remove selected corner")))
                         .padding([6, 12])
-                        .style(ui::tool(false))
+                        .style(ui::secondary)
                         .on_press(Message::DeleteLinkVertex(link.id.clone(), vertex)),
                 );
         } else {
-            controls = controls.push(hint(t("Click a route corner to select and remove it.")));
+            route = route.push(hint(t("Click a route corner to select and remove it.")));
         }
         if !link.route.is_empty() {
-            controls = controls.push(
-                button(text(t("Reset to automatic route")).size(13))
+            route = route.push(
+                button(icon_label("⟲", t("Reset to automatic route")))
                     .padding([6, 12])
-                    .style(ui::tool(false))
+                    .style(ui::secondary)
                     .on_press(Message::ResetLinkRoute(link.id.clone())),
             );
         }
-        controls
-            .push(hint(t("Press Delete to remove this line.")))
-            .push(
-                button(text(t("Remove line")).size(13))
-                    .padding([6, 12])
-                    .style(ui::danger)
-                    .on_press(Message::DeleteLink(link.id.clone())),
-            )
-            .into()
+
+        column![
+            column![
+                caption(t("SELECTED LINE")),
+                self.link_ends(&link.from, &link.to),
+            ]
+            .spacing(10),
+            card(
+                t("RELATIONSHIP"),
+                column![
+                    text_input(t("e.g. godfather of"), &link.label)
+                        .on_input(Message::EditLinkLabel)
+                        .padding([8, 10])
+                        .size(13)
+                        .style(ui::input),
+                    presets,
+                ]
+                .spacing(10),
+            ),
+            card(t("ROUTE"), route),
+            danger_zone(
+                t("Press Delete to remove this line."),
+                t("Remove line"),
+                Message::DeleteLink(link.id.clone()),
+            ),
+        ]
+        .spacing(16)
+        .into()
     }
 
     fn view_person<'a>(&'a self, p: &'a Person) -> Element<'a, Message> {
-        let bold = Font {
-            weight: Weight::Bold,
-            ..Font::DEFAULT
-        };
+        // header
+        let years = p.years();
+        let header = row![
+            avatar(&p.name, self.person_color(p), 48.0),
+            column![
+                text_input(t("Name"), &p.name)
+                    .on_input(Message::EditName)
+                    .on_submit(Message::CommitPerson)
+                    .font(ui::BOLD)
+                    .size(18)
+                    .padding([4, 6])
+                    .style(ui::title_input),
+                text(if years.is_empty() {
+                    t("Dates unknown").to_string()
+                } else {
+                    years
+                })
+                .size(12)
+                .color(ui::pal().muted),
+            ]
+            .spacing(0)
+            .width(Length::Fill),
+        ]
+        .spacing(12)
+        .align_y(alignment::Vertical::Center);
+
+        let details = row![
+            labelled(
+                t("Born"),
+                text_input(t("e.g. 1921"), &p.born)
+                    .on_input(Message::EditBorn)
+                    .on_submit(Message::CommitPerson)
+                    .size(13)
+                    .padding([7, 10])
+                    .style(ui::input),
+            ),
+            labelled(
+                t("Died"),
+                text_input(t("e.g. 1999"), &p.died)
+                    .on_input(Message::EditDied)
+                    .on_submit(Message::CommitPerson)
+                    .size(13)
+                    .padding([7, 10])
+                    .style(ui::input),
+            ),
+        ]
+        .spacing(10);
 
         // clans
         let mut chips: Vec<Element<'a, Message>> = p
@@ -1612,11 +2348,24 @@ impl App {
             .iter()
             .filter_map(|cid| self.data.clan(cid))
             .map(|c| {
-                button(text(format!("{}  ×", c.name)).size(12))
-                    .padding([3, 10])
+                tip(
+                    button(
+                        row![
+                            container(text(""))
+                                .width(Length::Fixed(8.0))
+                                .height(Length::Fixed(8.0))
+                                .style(ui::swatch(c.color())),
+                            text(c.name.as_str()).size(12),
+                            icon("✕").size(10),
+                        ]
+                        .spacing(6)
+                        .align_y(alignment::Vertical::Center),
+                    )
+                    .padding([4, 10])
                     .style(ui::chip(c.color()))
-                    .on_press(Message::RemoveFromClan(c.id.clone()))
-                    .into()
+                    .on_press(Message::RemoveFromClan(c.id.clone())),
+                    t("Remove from clan"),
+                )
             })
             .collect();
         let choices: Vec<ClanChoice> = self
@@ -1634,13 +2383,16 @@ impl App {
                 pick_list(choices, None::<ClanChoice>, Message::AddToClan)
                     .placeholder(t("+ clan"))
                     .text_size(12)
-                    .padding([3, 8])
+                    .padding([4, 10])
+                    .style(ui::pick_chip)
                     .into(),
             );
+        } else if p.clans.is_empty() {
+            chips.push(hint(t("Create a clan in the sidebar first.")).into());
         }
 
         // lines
-        let mut lines = Column::new().spacing(4);
+        let mut lines = Column::new().spacing(2);
         let mut line_count = 0usize;
         for l in self
             .data
@@ -1658,37 +2410,55 @@ impl App {
             } else {
                 (if undirected { "↔" } else { "←" }, &l.from)
             };
-            let other_name = self
-                .data
-                .person(other)
-                .map(|o| o.name.as_str())
-                .unwrap_or("?");
+            let other_person = self.data.person(other);
+            let other_name = other_person.map_or("?", |o| o.name.as_str());
+            let color = other_person.map_or(ui::pal().subtle, |o| self.person_color(o));
             lines = lines.push(
                 row![
-                    text(arrow).size(13).color(ui::MUTED),
-                    button(text(other_name).size(13))
-                        .padding(0)
-                        .style(ui::link)
-                        .on_press(Message::FocusPerson(other.clone())),
-                    text(format!("· {}", l.label))
-                        .size(12)
-                        .color(ui::MUTED)
-                        .width(Length::Fill),
-                    button(text("✕").size(11))
-                        .padding([0, 4])
-                        .style(ui::ghost)
-                        .on_press(Message::DeleteLink(l.id.clone())),
+                    button(
+                        row![
+                            avatar(other_name, color, 24.0),
+                            column![
+                                text(other_name).size(13).wrapping(text::Wrapping::None),
+                                row![
+                                    icon(arrow).size(11).color(ui::pal().subtle),
+                                    text(l.label.as_str()).size(11).color(ui::pal().muted),
+                                ]
+                                .spacing(4),
+                            ]
+                            .width(Length::Fill),
+                        ]
+                        .spacing(10)
+                        .align_y(alignment::Vertical::Center),
+                    )
+                    .width(Length::Fill)
+                    .padding([4, 6])
+                    .style(ui::list_item(false))
+                    .on_press(Message::FocusPerson(other.clone())),
+                    tip(
+                        button(icon("⚙").size(12))
+                            .padding([3, 6])
+                            .style(ui::ghost)
+                            .on_press(Message::SelectLink(l.id.clone())),
+                        t("Edit line"),
+                    ),
+                    tip(
+                        button(icon("✕").size(11))
+                            .padding([3, 6])
+                            .style(ui::ghost)
+                            .on_press(Message::DeleteLink(l.id.clone())),
+                        t("Remove line"),
+                    ),
                 ]
-                .spacing(6)
+                .spacing(2)
                 .align_y(alignment::Vertical::Center),
             );
         }
         if line_count > MAX_LINES_LIST {
-            lines = lines.push(
-                text(tf("… {} more", &[&(line_count - MAX_LINES_LIST)]))
-                    .size(12)
-                    .color(ui::MUTED),
-            );
+            lines = lines.push(empty_hint(&tf(
+                "… {} more",
+                &[&(line_count - MAX_LINES_LIST)],
+            )));
         }
         if line_count == 0 {
             lines = lines.push(hint(t("Drag a handle onto another person to add a line.")));
@@ -1707,147 +2477,322 @@ impl App {
                 row![
                     button(
                         row![
+                            icon("▣").size(13).color(ui::pal().file_mark),
                             text(f.name.as_str()).size(13).width(Length::Fill),
-                            text(files::human_size(f.size)).size(12).color(ui::MUTED),
+                            text(files::human_size(f.size)).size(11).color(ui::pal().subtle),
                         ]
                         .spacing(8)
+                        .align_y(alignment::Vertical::Center),
                     )
                     .width(Length::Fill)
-                    .padding([6, 10])
+                    .padding([7, 10])
                     .style(ui::card)
                     .on_press(Message::OpenFile(f.id.clone())),
-                    button(text("✕").size(11))
-                        .padding([0, 4])
-                        .style(ui::ghost)
-                        .on_press(Message::DeleteFile(f.id.clone())),
+                    tip(
+                        button(icon("✕").size(11))
+                            .padding([3, 6])
+                            .style(ui::ghost)
+                            .on_press(Message::DeleteFile(f.id.clone())),
+                        t("Delete file"),
+                    ),
                 ]
                 .spacing(4)
                 .align_y(alignment::Vertical::Center),
             );
         }
         let drop_zone = button(
-            container(text(t("Drop files here or choose…")).size(13))
-                .width(Length::Fill)
-                .align_x(alignment::Horizontal::Center)
-                .padding(18),
+            column![
+                icon("⇧").size(18),
+                text(t("Drop files here or choose…")).size(12),
+            ]
+            .spacing(4)
+            .width(Length::Fill)
+            .align_x(alignment::Horizontal::Center),
         )
         .width(Length::Fill)
+        .padding(14)
         .style(ui::drop_zone)
         .on_press(Message::ChooseFiles);
 
-        column![
-            text_input(t("Name"), &p.name)
-                .on_input(Message::EditName)
-                .on_submit(Message::CommitPerson)
-                .font(bold)
-                .size(18)
-                .padding(6),
+        let has_notes = self.with_notes.contains(&p.id);
+        let notes = button(
             row![
-                text_input(t("born"), &p.born)
-                    .on_input(Message::EditBorn)
-                    .on_submit(Message::CommitPerson)
+                icon("✎").size(14).color(ui::pal().note_mark),
+                column![
+                    text(if has_notes {
+                        t("Open notes")
+                    } else {
+                        t("Write notes")
+                    })
                     .size(13)
-                    .padding(6),
-                text_input(t("died"), &p.died)
-                    .on_input(Message::EditDied)
-                    .on_submit(Message::CommitPerson)
-                    .size(13)
-                    .padding(6),
+                    .font(ui::SEMIBOLD),
+                    text(t("Markdown, saved automatically"))
+                        .size(11)
+                        .color(ui::pal().muted),
+                ]
+                .width(Length::Fill),
+                icon("→").size(13).color(ui::pal().subtle),
             ]
-            .spacing(6),
-            section(t("CLANS")),
-            Row::with_children(chips).spacing(6).wrap(),
-            section(t("LINES")),
-            lines,
-            hint(t("On the board, drag a line label to reposition it or drag a segment to change the route.")),
-            button(text(t("Edit notes (markdown)")).size(13))
-                .padding([6, 12])
-                .style(ui::tool(false))
-                .on_press(Message::OpenNote(NoteKey::Person(p.id.clone()))),
-            section(tf("FILES · {}", &[&person_files.len()])),
-            file_list,
-            drop_zone,
-            button(text(t("Delete person")).size(13))
-                .padding([6, 12])
-                .style(ui::danger)
-                .on_press(Message::DeletePerson),
+            .spacing(10)
+            .align_y(alignment::Vertical::Center),
+        )
+        .width(Length::Fill)
+        .padding([8, 12])
+        .style(ui::card)
+        .on_press(Message::OpenNote(NoteKey::Person(p.id.clone())));
+
+        column![
+            header,
+            card(t("DETAILS"), details),
+            card(t("CLANS"), Row::with_children(chips).spacing(6).wrap().vertical_spacing(6)),
+            card(
+                tf("LINES · {}", &[&line_count]),
+                column![
+                    lines,
+                    hint(t("On the board, drag a line label to reposition it or drag a segment to change the route.")),
+                ]
+                .spacing(8),
+            ),
+            notes,
+            card(
+                tf("FILES · {}", &[&person_files.len()]),
+                column![file_list, drop_zone].spacing(8),
+            ),
+            danger_zone(
+                t("Removes the person with their lines, notes and files."),
+                t("Delete person"),
+                Message::AskDelete(Confirm::Person(p.id.clone())),
+            ),
         ]
-        .spacing(10)
+        .spacing(14)
         .into()
     }
 
     fn view_clan<'a>(&'a self, c: &'a Clan) -> Element<'a, Message> {
         let count = self.clan_counts.get(&c.id).copied().unwrap_or(0);
-        column![
-            section(t("CLAN")),
-            text_input(t("Clan name"), &c.name)
-                .on_input(Message::RenameClan)
-                .size(18)
-                .padding(6),
-            row![
-                container(text(""))
-                    .width(Length::Fixed(18.0))
-                    .height(Length::Fixed(18.0))
-                    .style(ui::swatch(c.color())),
-                button(text(t("Change colour")).size(13))
-                    .padding([4, 10])
-                    .style(ui::tool(false))
-                    .on_press(Message::CycleClanColor),
+
+        let header = row![
+            container(icon("◎").size(20).color(Color::WHITE))
+                .center(Length::Fixed(48.0))
+                .style(ui::swatch(c.color())),
+            column![
+                text_input(t("Clan name"), &c.name)
+                    .on_input(Message::RenameClan)
+                    .font(ui::BOLD)
+                    .size(18)
+                    .padding([4, 6])
+                    .style(ui::title_input),
+                text(tf("{} members", &[&count])).size(12).color(ui::pal().muted),
             ]
-            .spacing(8)
-            .align_y(alignment::Vertical::Center),
-            text(tf("{} members", &[&count])).size(13).color(ui::MUTED),
-            button(text(t("Fit to clan")).size(13))
-                .padding([6, 12])
-                .style(ui::tool(false))
-                .on_press(Message::FitClan),
-            button(text(t("Edit notes (markdown)")).size(13))
-                .padding([6, 12])
-                .style(ui::tool(false))
-                .on_press(Message::OpenNote(NoteKey::Clan(c.id.clone()))),
-            hint(t("Use the Clan tool and click people on the board to add or remove them. A person can be in several clans.")),
-            button(text(t("Delete clan")).size(13))
-                .padding([6, 12])
-                .style(ui::danger)
-                .on_press(Message::DeleteClan),
+            .width(Length::Fill),
         ]
-        .spacing(10)
+        .spacing(12)
+        .align_y(alignment::Vertical::Center);
+
+        let colours = Row::with_children(PALETTE.iter().enumerate().map(|(i, rgb)| {
+            let color = Color::from_rgb(rgb[0], rgb[1], rgb[2]);
+            let current = c.color == *rgb;
+            button(
+                container(if current {
+                    icon("✓").size(12).color(Color::WHITE)
+                } else {
+                    icon("")
+                })
+                .center(Length::Fixed(18.0))
+                .style(ui::swatch(color)),
+            )
+            .padding(2)
+            .style(ui::list_item(current))
+            .on_press(Message::SetClanColor(i))
+            .into()
+        }))
+        .spacing(2)
+        .wrap()
+        .vertical_spacing(4);
+
+        let mut members = Column::new().spacing(1);
+        let mut shown = 0usize;
+        for p in self.data.people.iter().filter(|p| p.clans.contains(&c.id)) {
+            shown += 1;
+            if shown > MAX_LINES_LIST {
+                continue;
+            }
+            members = members.push(
+                button(
+                    row![
+                        avatar(&p.name, c.color(), 22.0),
+                        text(p.name.as_str()).size(13).width(Length::Fill),
+                        text(p.years()).size(11).color(ui::pal().subtle),
+                    ]
+                    .spacing(10)
+                    .align_y(alignment::Vertical::Center),
+                )
+                .width(Length::Fill)
+                .padding([4, 6])
+                .style(ui::list_item(false))
+                .on_press(Message::FocusPerson(p.id.clone())),
+            );
+        }
+        if shown > MAX_LINES_LIST {
+            members = members.push(empty_hint(&tf("… {} more", &[&(shown - MAX_LINES_LIST)])));
+        }
+        if shown == 0 {
+            members = members.push(hint(t("No members yet.")));
+        }
+
+        let clan_tool = self.tool == Tool::Members;
+        column![
+            header,
+            card(t("COLOUR"), colours),
+            row![
+                button(icon_label("◎", if clan_tool { t("Done adding") } else { t("Add / remove members") }))
+                    .padding([7, 12])
+                    .width(Length::Fill)
+                    .style(if clan_tool { ui::primary } else { ui::secondary })
+                    .on_press(Message::Tool(if clan_tool { Tool::Select } else { Tool::Members })),
+                tip(
+                    button(icon("⊡").size(14))
+                        .padding([7, 11])
+                        .style(ui::secondary)
+                        .on_press(Message::FitClan),
+                    t("Fit to clan"),
+                ),
+            ]
+            .spacing(8),
+            hint(t("Click “Add / remove members”, then click people on the board. A person can be in several clans.")),
+            button(
+                row![
+                    icon("✎").size(14).color(ui::pal().note_mark),
+                    text(if self.with_notes.contains(&c.id) {
+                        t("Open notes")
+                    } else {
+                        t("Write notes")
+                    })
+                    .size(13)
+                    .font(ui::SEMIBOLD)
+                    .width(Length::Fill),
+                    icon("→").size(13).color(ui::pal().subtle),
+                ]
+                .spacing(10)
+                .align_y(alignment::Vertical::Center),
+            )
+            .width(Length::Fill)
+            .padding([9, 12])
+            .style(ui::card)
+            .on_press(Message::OpenNote(NoteKey::Clan(c.id.clone()))),
+            card(tf("MEMBERS · {}", &[&count]), members),
+            danger_zone(
+                t("Members stay on the board; only the clan is removed."),
+                t("Delete clan"),
+                Message::AskDelete(Confirm::Clan(c.id.clone())),
+            ),
+        ]
+        .spacing(14)
         .into()
+    }
+
+    fn view_confirm(&self, confirm: &Confirm) -> Element<'_, Message> {
+        let (title, body) = match confirm {
+            Confirm::Person(id) => (
+                tf(
+                    "Delete {}?",
+                    &[&self.data.person(id).map_or("", |p| p.name.as_str())],
+                ),
+                t("Their lines, notes and attached files are removed as well. This cannot be undone."),
+            ),
+            Confirm::Clan(id) => (
+                tf(
+                    "Delete {}?",
+                    &[&self.data.clan(id).map_or("", |c| c.name.as_str())],
+                ),
+                t("The members stay on the board. The clan and its notes are removed. This cannot be undone."),
+            ),
+            Confirm::Page => (
+                tf(
+                    "Delete {}?",
+                    &[&self.note.as_ref().map_or("", |n| n.name.as_str())],
+                ),
+                t("The page is removed from the book. This cannot be undone."),
+            ),
+        };
+        let dialog = container(
+            column![
+                row![
+                    container(icon("⚠").size(18).color(ui::pal().danger))
+                        .center(Length::Fixed(38.0))
+                        .style(ui::avatar(ui::pal().danger)),
+                    column![
+                        text(title).size(16).font(ui::BOLD),
+                        text(body).size(13).color(ui::pal().muted),
+                    ]
+                    .spacing(6)
+                    .width(Length::Fill),
+                ]
+                .spacing(14),
+                row![
+                    space::horizontal(),
+                    button(text(t("Cancel")).size(13))
+                        .padding([7, 16])
+                        .style(ui::secondary)
+                        .on_press(Message::CancelDelete),
+                    button(text(t("Delete")).size(13))
+                        .padding([7, 16])
+                        .style(ui::danger_solid)
+                        .on_press(Message::ConfirmDelete),
+                ]
+                .spacing(8),
+            ]
+            .spacing(22),
+        )
+        .width(Length::Fixed(440.0))
+        .padding(22)
+        .style(ui::dialog);
+
+        container(dialog)
+            .center(Length::Fill)
+            .style(ui::backdrop)
+            .into()
     }
 
     fn view_status(&self) -> Element<'_, Message> {
         let pending = self.db.pending();
-        let save = if let Some(e) = self.db.last_error() {
-            tf("save error: {}", &[&e])
+        let (dot, save) = if let Some(e) = self.db.last_error() {
+            (ui::pal().danger, tf("save error: {}", &[&e]))
         } else if pending > 0 || self.dirty.is_some() {
-            tf("saving… ({})", &[&pending])
+            (ui::pal().note_mark, tf("saving… ({})", &[&pending]))
         } else {
-            t("all changes saved").into()
+            (ui::pal().success, t("all changes saved").into())
         };
-        let left = tf(
-            "{} people · {} clans · {} lines · {}",
+        let counts = tf(
+            "{} people · {} clans · {} lines",
             &[
                 &self.data.people.len(),
                 &self.data.clans.len(),
                 &self.data.links.len(),
-                &save,
             ],
         );
-        let right = match &self.notice {
-            Some(n) => format!("{n}   ·   {:.0}%", self.camera.zoom * 100.0),
-            None => format!("{:.0}%", self.camera.zoom * 100.0),
-        };
 
         container(
             row![
-                text(left).size(12).color(ui::MUTED).width(Length::Fill),
-                text(right).size(12).color(ui::MUTED),
+                container(text(""))
+                    .width(Length::Fixed(7.0))
+                    .height(Length::Fixed(7.0))
+                    .style(ui::swatch(dot)),
+                text(save).size(12).color(ui::pal().muted),
+                text("·").size(12).color(ui::pal().subtle),
+                text(counts).size(12).color(ui::pal().muted).width(Length::Fill),
+                text(format!("{:.0}%", self.camera.zoom * 100.0))
+                    .size(12)
+                    .color(ui::pal().muted),
             ]
-            .padding([5, 12]),
+            .spacing(8)
+            .align_y(alignment::Vertical::Center)
+            .padding([0, 12]),
         )
         .width(Length::Fill)
         .height(Length::Fixed(STATUS_H))
-        .style(ui::panel)
+        .align_y(alignment::Vertical::Center)
+        .style(ui::chrome)
         .into()
     }
 }
@@ -1856,18 +2801,152 @@ impl App {
 // small view helpers
 // ---------------------------------------------------------------------------
 
+/// Small bold uppercase heading (settings pages, inspector cards).
 pub fn section<'a>(label: impl ToString) -> Text<'a> {
+    caption(label)
+}
+
+fn caption<'a>(label: impl ToString) -> Text<'a> {
     text(label.to_string())
         .size(11)
-        .color(ui::MUTED)
-        .font(Font {
-            weight: Weight::Bold,
-            ..Font::DEFAULT
-        })
+        .color(ui::pal().muted)
+        .font(ui::BOLD)
 }
 
 pub fn hint<'a>(label: &'a str) -> Text<'a> {
-    text(label).size(12).color(ui::MUTED)
+    text(label).size(12).color(ui::pal().muted)
+}
+
+fn empty_hint<'a, M: 'a>(label: &str) -> Element<'a, M> {
+    container(text(label.to_string()).size(12).color(ui::pal().subtle))
+        .padding([6, 10])
+        .into()
+}
+
+/// Symbol from the icon font.
+pub fn icon<'a>(glyph: &'a str) -> Text<'a> {
+    text(glyph).font(ui::ICON).size(14)
+}
+
+/// `glyph label` content for buttons.
+pub fn icon_label<'a, M: 'a>(glyph: &'a str, label: &'a str) -> Element<'a, M> {
+    row![icon(glyph).size(13), text(label).size(13)]
+        .spacing(7)
+        .align_y(alignment::Vertical::Center)
+        .into()
+}
+
+/// Hover tooltip.
+pub fn tip<'a, M: 'a>(content: impl Into<Element<'a, M>>, label: &'a str) -> Element<'a, M> {
+    tooltip(
+        content,
+        container(text(label).size(12).color(ui::toast_text()))
+            .padding([4, 8])
+            .style(ui::tooltip),
+        tooltip::Position::Bottom,
+    )
+    .gap(6)
+    .into()
+}
+
+/// Hover tooltip with a keyboard shortcut.
+fn tip_key<'a, M: 'a>(
+    content: impl Into<Element<'a, M>>,
+    label: &'a str,
+    key: &'a str,
+) -> Element<'a, M> {
+    tooltip(
+        content,
+        container(
+            row![
+                text(label).size(12).color(ui::toast_text()),
+                text(key).size(11).color(ui::alpha(ui::toast_text(), 0.6)),
+            ]
+            .spacing(8),
+        )
+        .padding([4, 8])
+        .style(ui::tooltip),
+        tooltip::Position::Bottom,
+    )
+    .gap(6)
+    .into()
+}
+
+fn kbd<'a, M: 'a>(keys: &'a str) -> Element<'a, M> {
+    container(text(keys).size(11))
+        .padding([1, 6])
+        .style(ui::kbd)
+        .into()
+}
+
+fn badge<'a, M: 'a>(count: usize) -> Element<'a, M> {
+    container(text(count.to_string()).size(10))
+        .padding([1, 6])
+        .style(ui::badge)
+        .into()
+}
+
+/// Round avatar with up to two initials.
+fn avatar<'a, M: 'a>(name: &str, color: Color, size: f32) -> Element<'a, M> {
+    let initials: String = name
+        .split_whitespace()
+        .filter_map(|w| w.chars().next())
+        .take(2)
+        .flat_map(char::to_uppercase)
+        .collect();
+    container(text(initials).size(size * 0.38).font(ui::SEMIBOLD))
+        .center(Length::Fixed(size))
+        .style(ui::avatar(color))
+        .into()
+}
+
+/// Inspector card with a caption.
+fn card<'a, M: 'a>(title: impl ToString, content: impl Into<Element<'a, M>>) -> Element<'a, M> {
+    container(column![caption(title), content.into()].spacing(10))
+        .width(Length::Fill)
+        .padding(14)
+        .style(ui::section_card)
+        .into()
+}
+
+/// Field with a small label above it.
+fn labelled<'a, M: 'a>(label: &'a str, field: impl Into<Element<'a, M>>) -> Element<'a, M> {
+    column![text(label).size(11).color(ui::pal().muted), field.into()]
+        .spacing(4)
+        .width(Length::Fill)
+        .into()
+}
+
+/// "+ New …" row at the end of a sidebar list.
+fn add_row<'a, M: Clone + 'a>(label: &'a str, msg: M) -> Element<'a, M> {
+    button(icon_label("+", label))
+        .width(Length::Fill)
+        .padding([5, 10])
+        .style(ui::add_row)
+        .on_press(msg)
+        .into()
+}
+
+/// Explanation plus a destructive button at the bottom of the inspector.
+fn danger_zone<'a, M: Clone + 'a>(explain: &'a str, label: &'a str, msg: M) -> Element<'a, M> {
+    column![
+        hline(),
+        hint(explain),
+        button(icon_label("✕", label))
+            .padding([7, 14])
+            .style(ui::danger)
+            .on_press(msg),
+    ]
+    .spacing(10)
+    .into()
+}
+
+fn vrule<'a, M: 'a>(height: f32) -> Element<'a, M> {
+    container(text(""))
+        .width(Length::Fixed(1.0))
+        .height(Length::Fixed(height))
+        .style(ui::divider)
+        .into()
 }
 
 pub fn hline<'a, M: 'a>() -> Element<'a, M> {
@@ -1884,4 +2963,37 @@ pub fn vline<'a, M: 'a>() -> Element<'a, M> {
         .height(Length::Fill)
         .style(ui::divider)
         .into()
+}
+
+/// Maps a key press that no widget handled to a workspace message.
+fn shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Message> {
+    use keyboard::Key;
+    use keyboard::key::Named;
+
+    match key.as_ref() {
+        Key::Named(Named::Escape) => Some(Message::Escape),
+        Key::Named(Named::Delete) => Some(Message::DeleteKey),
+        Key::Named(Named::Enter) => Some(Message::EnterKey),
+        Key::Character(c) if modifiers.command() => match c {
+            "f" => Some(Message::FocusSearch),
+            "b" => Some(Message::ToggleSidebar),
+            "," => Some(Message::OpenSettings(SettingsPage::General)),
+            _ => None,
+        },
+        Key::Character(c) if !modifiers.alt() => {
+            let msg = match c {
+                "v" => Message::Tool(Tool::Select),
+                "g" => Message::Tool(Tool::Clan),
+                "p" => Message::Tool(Tool::AddPerson),
+                "c" => Message::Tool(Tool::Connect),
+                "f" => Message::FitToWindow,
+                "+" | "=" => Message::ZoomStep(1.25),
+                "-" => Message::ZoomStep(1.0 / 1.25),
+                "0" => Message::ZoomReset,
+                _ => return None,
+            };
+            Some(Message::Shortcut(Box::new(msg)))
+        }
+        _ => None,
+    }
 }

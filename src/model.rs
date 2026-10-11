@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use iced::Color;
+use iced::{Color, Rectangle};
 use serde::{Deserialize, Serialize};
 
 pub type Id = String;
@@ -74,11 +74,28 @@ pub struct Clan {
     pub color: [f32; 3],
     #[serde(default)]
     pub label_offset: [f32; 2],
+    /// Top-left corner of the box drawn while the clan has no members.
+    #[serde(default)]
+    pub position: Option<[f32; 2]>,
 }
+
+/// Size of the box of a clan without members, in world units.
+pub const CLAN_BOX_W: f32 = 170.0;
+pub const CLAN_BOX_H: f32 = 70.0;
 
 impl Clan {
     pub fn color(&self) -> Color {
         Color::from_rgb(self.color[0], self.color[1], self.color[2])
+    }
+
+    /// Board area of the clan's box (shown only while it has no members).
+    pub fn box_rect(&self) -> Option<Rectangle> {
+        self.position.map(|[x, y]| Rectangle {
+            x,
+            y,
+            width: CLAN_BOX_W,
+            height: CLAN_BOX_H,
+        })
     }
 }
 

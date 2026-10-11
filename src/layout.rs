@@ -785,6 +785,7 @@ mod tests {
                 name: "Family".into(),
                 color: [0.2, 0.4, 0.6],
                 label_offset: [0.0, 0.0],
+                position: None,
             }],
             vec![
                 link("partners", "a", "b", "married"),

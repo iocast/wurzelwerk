@@ -4,20 +4,46 @@
 //! * Linux and Windows: `~/.config` (Linux honours `$XDG_CONFIG_HOME`)
 //! * macOS: `~/Library/Application Support`
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::i18n::Lang;
+use crate::i18n::{Lang, t};
 
 const APP_DIR: &str = "wurzelwerk";
 const FILE: &str = "settings.json";
 const MAX_RECENT: usize = 8;
 
+/// Light / dark look; `System` follows the operating system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Appearance {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Appearance {
+    pub const ALL: [Appearance; 3] = [Self::System, Self::Light, Self::Dark];
+}
+
+impl fmt::Display for Appearance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::System => t("System"),
+            Self::Light => t("Light"),
+            Self::Dark => t("Dark"),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub language: Lang,
+    pub appearance: Appearance,
     /// Workspace opened at start-up.
     pub workspace: Option<PathBuf>,
     /// Most recently used first.
@@ -29,6 +55,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             language: Lang::detect(),
+            appearance: Appearance::System,
             workspace: None,
             recent: Vec::new(),
             check_updates: true,

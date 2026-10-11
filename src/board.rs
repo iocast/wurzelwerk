@@ -22,6 +22,7 @@ use iced::{Color, Font, Pixels, Point, Rectangle, Renderer, Size, Theme, Vector,
 
 use crate::app::{App, Message, Tool};
 use crate::camera::Camera;
+use crate::i18n::t;
 use crate::model::{Link, LinkLabelPosition, LinkStyle, NODE_H, NODE_W, Person, link_style};
 use crate::routing::{LABEL_TEXT, Route, connection_preview, label_layout, label_width};
 use crate::ui;
@@ -89,6 +90,12 @@ pub enum Interaction {
         id: String,
         start: Point,
         offset: [f32; 2],
+    },
+    /// Moving the box of a clan without members.
+    DraggingClanBox {
+        id: String,
+        grab: Vector,
+        moved: bool,
     },
 }
 
@@ -242,6 +249,17 @@ impl canvas::Program<Message> for Board<'_> {
                             .and_capture(),
                     )
                 }
+                Interaction::DraggingClanBox { id, grab, moved } => {
+                    let world = cam.to_world(local(cursor.position()?));
+                    *moved = true;
+                    Some(
+                        canvas::Action::publish(Message::ClanMoved(
+                            id.clone(),
+                            [world.x - grab.x, world.y - grab.y],
+                        ))
+                        .and_capture(),
+                    )
+                }
                 Interaction::DraggingClanLabel { id, start, offset } => {
                     let world = cam.to_world(local(cursor.position()?));
                     Some(
@@ -277,9 +295,10 @@ impl canvas::Program<Message> for Board<'_> {
                 | Interaction::DraggingLinkLabel { id, .. } => {
                     Some(canvas::Action::publish(Message::LinkDropped(id)).and_capture())
                 }
-                Interaction::DraggingClanLabel { id, .. } => {
-                    Some(canvas::Action::publish(Message::ClanLabelDropped(id)).and_capture())
-                }
+                Interaction::DraggingClanLabel { id, .. }
+                | Interaction::DraggingClanBox {
+                    id, moved: true, ..
+                } => Some(canvas::Action::publish(Message::ClanLabelDropped(id)).and_capture()),
                 _ => Some(canvas::Action::capture()),
             },
             _ => None,
@@ -322,10 +341,10 @@ impl canvas::Program<Message> for Board<'_> {
                         segments: &[6.0, 4.0],
                         offset: 0,
                     },
-                    ..Stroke::default().with_width(1.6).with_color(ui::DARK)
+                    ..Stroke::default().with_width(1.6).with_color(ui::pal().selection)
                 },
             );
-            overlay.fill(&Path::circle(*cursor, 4.0), ui::DARK);
+            overlay.fill(&Path::circle(*cursor, 4.0), ui::pal().selection);
         }
 
         vec![board, overlay.into_geometry()]
@@ -345,15 +364,19 @@ impl canvas::Program<Message> for Board<'_> {
             Interaction::DraggingLinkRoute { .. }
             | Interaction::DraggingLinkVertex { .. }
             | Interaction::DraggingLinkLabel { .. } => mouse::Interaction::Grabbing,
-            Interaction::DraggingClanLabel { .. } => mouse::Interaction::Grabbing,
+            Interaction::DraggingClanLabel { .. } | Interaction::DraggingClanBox { .. } => {
+                mouse::Interaction::Grabbing
+            }
             Interaction::Idle => {
                 let Some(pos) = cursor.position_in(bounds) else {
                     return mouse::Interaction::default();
                 };
                 match self.app.tool {
-                    Tool::AddPerson | Tool::Connect => mouse::Interaction::Crosshair,
-                    Tool::Select | Tool::Clan => {
-                        if self.app.hit_test(self.app.camera.to_world(pos)).is_some()
+                    Tool::AddPerson | Tool::Connect | Tool::Clan => mouse::Interaction::Crosshair,
+                    Tool::Select | Tool::Members => {
+                        let world = self.app.camera.to_world(pos);
+                        if self.app.hit_test(world).is_some()
+                            || self.app.empty_clan_at(world).is_some()
                             || (self.app.tool == Tool::Select
                                 && (link_hit(self.app, &self.app.camera, pos)
                                     || link_vertex_hit(self.app, &self.app.camera, pos).is_some()))
@@ -489,11 +512,28 @@ impl Board<'_> {
         let select =
             |id: Option<String>| canvas::Action::publish(Message::SelectPerson(id)).and_capture();
 
+        // box of a clan without members: click opens it, drag moves it
+        if hit.is_none()
+            && matches!(app.tool, Tool::Select | Tool::Clan | Tool::Members)
+            && let Some(id) = app.empty_clan_at(world)
+            && let Some(rect) = app.data.clan(&id).and_then(|c| c.box_rect())
+        {
+            *state = Interaction::DraggingClanBox {
+                grab: Vector::new(world.x - rect.x, world.y - rect.y),
+                id: id.clone(),
+                moved: false,
+            };
+            return Some(canvas::Action::publish(Message::ShowClan(id)).and_capture());
+        }
+
         match (app.tool, hit) {
             (Tool::AddPerson, None) => {
                 Some(canvas::Action::publish(Message::AddPersonAt(world)).and_capture())
             }
-            (Tool::Clan, Some(p)) => {
+            (Tool::Clan, None) => {
+                Some(canvas::Action::publish(Message::AddClanAt(world)).and_capture())
+            }
+            (Tool::Members, Some(p)) => {
                 Some(canvas::Action::publish(Message::ToggleClan(p.id.clone())).and_capture())
             }
             (Tool::Connect, Some(p)) => {
@@ -504,7 +544,7 @@ impl Board<'_> {
                 };
                 Some(select(Some(p.id.clone())))
             }
-            (Tool::Select | Tool::AddPerson, Some(p)) => {
+            (Tool::Select | Tool::AddPerson | Tool::Clan, Some(p)) => {
                 *state = Interaction::Dragging {
                     id: p.id.clone(),
                     grab: Vector::new(world.x - p.x, world.y - p.y),
@@ -534,7 +574,7 @@ pub fn handle_points(p: &Person, cam: &Camera) -> [Point; 2] {
 
 fn draw_board(app: &App, frame: &mut Frame) {
     let size = frame.size();
-    frame.fill_rectangle(Point::ORIGIN, size, ui::BOARD_BG);
+    frame.fill_rectangle(Point::ORIGIN, size, ui::pal().board);
 
     let cam = app.camera;
     let z = cam.zoom;
@@ -544,6 +584,7 @@ fn draw_board(app: &App, frame: &mut Frame) {
         draw_grid(frame, &cam, view);
     }
     draw_hulls(app, frame, &cam, view);
+    draw_empty_clans(app, frame, &cam, view);
 
     if z < LOD_BLOCKS {
         draw_density(app, frame, &cam, view);
@@ -569,7 +610,7 @@ fn draw_grid(frame: &mut Frame, cam: &Camera, view: Rectangle) {
             wy += step;
         }
     });
-    frame.fill(&dots, ui::GRID_DOT);
+    frame.fill(&dots, ui::pal().grid_dot);
 }
 
 fn draw_hulls(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
@@ -616,6 +657,67 @@ fn draw_hulls(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
     }
 }
 
+/// Clans without members: dashed box in the clan colour with the name pill on top.
+fn draw_empty_clans(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
+    let z = cam.zoom;
+    for clan in &app.data.clans {
+        if app.clan_counts.get(&clan.id).copied().unwrap_or(0) > 0 {
+            continue;
+        }
+        let Some(rect) = clan.box_rect() else {
+            continue;
+        };
+        if !rect.intersects(&view) {
+            continue;
+        }
+        let color = clan.color();
+        let selected = app.show_clan && app.active_clan.as_deref() == Some(clan.id.as_str());
+        let origin = cam.to_screen(Point::new(rect.x, rect.y));
+        let size = Size::new(rect.width * z, rect.height * z);
+        let body = Path::new(|b| rounded_rect(b, origin, size, 12.0 * z));
+        frame.fill(&body, Color { a: 0.12, ..color });
+        frame.stroke(
+            &body,
+            Stroke {
+                line_dash: LineDash {
+                    segments: if selected { &[] } else { &[6.0, 4.0] },
+                    offset: 0,
+                },
+                ..Stroke::default()
+                    .with_width(if selected { 2.0 } else { 1.4 })
+                    .with_color(color)
+            },
+        );
+
+        if z >= 0.08 {
+            let label = clan.name.clone();
+            let w = label.chars().count() as f32 * 6.6 + 18.0;
+            let center = Point::new(origin.x + w / 2.0, origin.y);
+            let pill = Path::new(|b| {
+                rounded_rect(
+                    b,
+                    Point::new(center.x - w / 2.0, center.y - 10.0),
+                    Size::new(w, 20.0),
+                    10.0,
+                )
+            });
+            frame.fill(&pill, color);
+            text(frame, label, center, 11.5, Color::WHITE, true, true);
+        }
+        if z >= LOD_DETAIL {
+            text(
+                frame,
+                t("empty clan").to_owned(),
+                Point::new(origin.x + size.width / 2.0, origin.y + size.height * 0.58),
+                11.5 * z,
+                ui::alpha(color, 0.9),
+                false,
+                true,
+            );
+        }
+    }
+}
+
 fn draw_density(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
     let mut buckets: [Vec<Rectangle>; 4] = Default::default();
     app.grid.cells_in(view, |cell, count| {
@@ -643,7 +745,7 @@ fn draw_density(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
             &path,
             Color {
                 a: alpha,
-                ..ui::DARK
+                ..ui::pal().edge
             },
         );
     }
@@ -1529,7 +1631,7 @@ fn draw_edges(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
     if !solid.is_empty() {
         frame.stroke(
             &routes_path(&solid, cam),
-            Stroke::default().with_width(width).with_color(ui::EDGE),
+            Stroke::default().with_width(width).with_color(ui::pal().edge),
         );
     }
     if !dashed.is_empty() {
@@ -1540,7 +1642,7 @@ fn draw_edges(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
                     segments: &[6.0, 4.0],
                     offset: 0,
                 },
-                ..Stroke::default().with_width(width).with_color(ui::EDGE)
+                ..Stroke::default().with_width(width).with_color(ui::pal().edge)
             },
         );
     }
@@ -1549,7 +1651,7 @@ fn draw_edges(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
             &routes_path(&[r], cam),
             Stroke::default()
                 .with_width((3.0 * z).clamp(2.0, 4.0))
-                .with_color(ui::DANGER),
+                .with_color(ui::pal().selection),
         );
     }
     if !arrows.is_empty() {
@@ -1561,7 +1663,7 @@ fn draw_edges(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
                 b.close();
             }
         });
-        frame.fill(&path, ui::EDGE);
+        frame.fill(&path, ui::pal().edge);
     }
     if let Some(r) = selected {
         for point_index in 1..r.points.len().saturating_sub(1) {
@@ -1574,13 +1676,13 @@ fn draw_edges(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
                 cam.to_screen(r.points[point_index]),
                 if active { 7.0 } else { 5.0 },
             );
-            frame.fill(&handle, Color::WHITE);
+            frame.fill(&handle, ui::pal().node);
             frame.stroke(
                 &handle,
                 Stroke::default().with_width(1.5).with_color(if active {
-                    ui::DANGER
+                    ui::pal().selection
                 } else {
-                    ui::EDGE
+                    ui::pal().edge
                 }),
             );
         }
@@ -1600,14 +1702,14 @@ fn draw_edges(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
             );
         }
     });
-    frame.fill(&backgrounds, ui::BOARD_BG);
+    frame.fill(&backgrounds, ui::pal().board);
     for (at, centered, label) in labels {
         text(
             frame,
             label.to_string(),
             at,
             label_size,
-            ui::MUTED,
+            ui::pal().muted,
             false,
             centered,
         );
@@ -1654,20 +1756,50 @@ fn draw_nodes(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
     let size = Size::new(NODE_W * z, NODE_H * z);
 
     if z >= LOD_DETAIL {
-        let radius = 6.0 * z;
+        let pal = ui::pal();
+        let radius = 8.0 * z;
+        // soft drop shadow, one batched path offset below the cards
+        let shadows = Path::new(|b| {
+            for &i in &visible {
+                let p = &people[i];
+                let s = cam.to_screen(Point::new(p.x, p.y));
+                rounded_rect(b, Point::new(s.x, s.y + 2.0 * z), size, radius);
+            }
+        });
+        frame.fill(&shadows, pal.node_shadow);
         let bodies = Path::new(|b| {
             for &i in &visible {
                 let p = &people[i];
                 rounded_rect(b, cam.to_screen(Point::new(p.x, p.y)), size, radius);
             }
         });
-        frame.fill(&bodies, Color::WHITE);
+        frame.fill(&bodies, pal.node);
         frame.stroke(
             &bodies,
             Stroke::default()
                 .with_width(1.0)
-                .with_color(ui::NODE_BORDER),
+                .with_color(pal.node_border),
         );
+
+        // accent bar in the colour of the first clan, one path per clan colour
+        let mut bars: HashMap<usize, Vec<Point>> = HashMap::new();
+        for &i in &visible {
+            let p = &people[i];
+            if let Some(&ci) = p.clans.first().and_then(|c| app.data.clan_idx.get(c)) {
+                bars.entry(ci)
+                    .or_default()
+                    .push(cam.to_screen(Point::new(p.x, p.y)));
+            }
+        }
+        let bar = Size::new(size.width - 2.0 * radius, (3.0 * z).max(1.5));
+        for (ci, points) in bars {
+            let path = Path::new(|b| {
+                for s in &points {
+                    rounded_rect(b, Point::new(s.x + radius, s.y), bar, bar.height / 2.0);
+                }
+            });
+            frame.fill(&path, app.data.clans[ci].color());
+        }
 
         let mut dots: HashMap<usize, Vec<Point>> = HashMap::new();
         let name_size = 13.0 * z;
@@ -1681,7 +1813,7 @@ fn draw_nodes(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
                 ellipsize(&p.name, 17),
                 Point::new(cx, s.y + size.height * 0.35),
                 name_size,
-                ui::TEXT,
+                ui::pal().text,
                 true,
                 true,
             );
@@ -1689,8 +1821,8 @@ fn draw_nodes(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
             // notes / attachment markers, top-right corner of the card
             let mut mx = s.x + size.width - 8.0 * z;
             for (present, letter, color) in [
-                (app.with_files.contains(&p.id), "F", ui::FILE_MARK),
-                (app.with_notes.contains(&p.id), "N", ui::NOTE_MARK),
+                (app.with_files.contains(&p.id), "F", ui::pal().file_mark),
+                (app.with_notes.contains(&p.id), "N", ui::pal().note_mark),
             ] {
                 if present {
                     text(
@@ -1722,7 +1854,7 @@ fn draw_nodes(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
                     years,
                     Point::new(x0, y),
                     year_size,
-                    ui::MUTED,
+                    ui::pal().muted,
                     false,
                     false,
                 );
@@ -1758,7 +1890,7 @@ fn draw_nodes(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
         let block = Size::new(size.width.max(1.5), size.height.max(1.0));
         for (g, points) in groups {
             let color = if g == none {
-                ui::MUTED
+                ui::pal().muted
             } else {
                 app.data.clans[g].color()
             };
@@ -1767,27 +1899,35 @@ fn draw_nodes(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
         }
     }
 
-    // selection
+    // selection: soft halo + crisp accent outline
     if let Some(p) = app.selected_person() {
+        let accent = ui::pal().selection;
         let s = cam.to_screen(Point::new(p.x, p.y));
-        let pad = 2.0;
-        let outline = Path::new(|b| {
-            rounded_rect(
-                b,
-                Point::new(s.x - pad, s.y - pad),
-                Size::new(size.width + pad * 2.0, size.height + pad * 2.0),
-                7.0 * z,
-            )
-        });
+        let ring = |pad: f32| {
+            Path::new(|b| {
+                rounded_rect(
+                    b,
+                    Point::new(s.x - pad, s.y - pad),
+                    Size::new(size.width + pad * 2.0, size.height + pad * 2.0),
+                    8.0 * z + pad,
+                )
+            })
+        };
         frame.stroke(
-            &outline,
-            Stroke::default().with_width(2.2).with_color(ui::DARK),
+            &ring(3.5),
+            Stroke::default()
+                .with_width(5.0)
+                .with_color(ui::alpha(accent, 0.22)),
+        );
+        frame.stroke(
+            &ring(1.5),
+            Stroke::default().with_width(2.0).with_color(accent),
         );
         if z >= LOD_HANDLES {
             for h in handle_points(p, cam) {
                 let c = Path::circle(h, 5.0);
-                frame.fill(&c, Color::WHITE);
-                frame.stroke(&c, Stroke::default().with_width(1.5).with_color(ui::DARK));
+                frame.fill(&c, ui::pal().node);
+                frame.stroke(&c, Stroke::default().with_width(2.0).with_color(accent));
             }
         }
     }

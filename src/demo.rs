@@ -100,6 +100,7 @@ pub fn generate(clan_count: usize, per_clan: usize) -> (Vec<Clan>, Vec<Person>, 
             name: clan_name(i),
             color: PALETTE[i % PALETTE.len()],
             label_offset: [0.0, 0.0],
+            position: None,
         })
         .collect();
 
