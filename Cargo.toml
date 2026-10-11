@@ -20,6 +20,9 @@ iced-markdown-editor = "0.3.0"
 ureq = { version = "3.4.2", features = ["json"] }
 sys-locale = "0.3.2"
 
+[build-dependencies]
+winresource = "0.1.31" # embeds assets/icon.ico into the Windows exe (build.rs)
+
 # Installers (cargo packager): built by .github/workflows/release.yml, written to target/packages.
 [package.metadata.packager]
 product-name = "Wurzelwerk"
