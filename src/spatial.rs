@@ -78,8 +78,8 @@ impl Grid {
         }
     }
 
-    /// Occupied cells intersecting `r` with their node count (overview rendering).
-    pub fn cells_in(&self, r: Rectangle, mut f: impl FnMut(Rectangle, usize)) {
+    /// Occupied cells intersecting `r` with their nodes (overview rendering).
+    pub fn cells_in(&self, r: Rectangle, mut f: impl FnMut(Rectangle, &[u32])) {
         for (&(cx, cy), bucket) in &self.cells {
             let cell = Rectangle {
                 x: cx as f32 * CELL,
@@ -88,7 +88,7 @@ impl Grid {
                 height: CELL,
             };
             if cell.intersects(&r) {
-                f(cell, bucket.len());
+                f(cell, bucket);
             }
         }
     }
@@ -98,6 +98,8 @@ impl Grid {
 pub struct Hull {
     pub points: Vec<Point>,
     pub bbox: Rectangle,
+    /// People inside the hull (shown on the clan label).
+    pub members: usize,
 }
 
 const HULL_PAD: f32 = 22.0;
@@ -109,8 +111,11 @@ fn corners(p: &Person, out: &mut Vec<Point>) {
     out.push(Point::new(p.x - HULL_PAD, p.y + NODE_H + HULL_PAD));
 }
 
-/// One pass over all people, one hull per clan.
-pub fn all_hulls(people: &[Person], clans: &[Clan]) -> HashMap<Id, Hull> {
+/// One pass over the people, one hull per clan.
+pub fn all_hulls<'a>(
+    people: impl IntoIterator<Item = &'a Person>,
+    clans: &[Clan],
+) -> HashMap<Id, Hull> {
     let mut points: HashMap<&str, Vec<Point>> = HashMap::with_capacity(clans.len());
     for p in people {
         for c in &p.clans {
@@ -126,15 +131,19 @@ pub fn all_hulls(people: &[Person], clans: &[Clan]) -> HashMap<Id, Hull> {
         .collect()
 }
 
-pub fn clan_hull(people: &[Person], clan: &str) -> Option<Hull> {
+pub fn clan_hull<'a>(people: impl IntoIterator<Item = &'a Person>, clan: &str) -> Option<Hull> {
     let mut pts = Vec::new();
-    for p in people.iter().filter(|p| p.clans.iter().any(|c| c == clan)) {
+    for p in people
+        .into_iter()
+        .filter(|p| p.clans.iter().any(|c| c == clan))
+    {
         corners(p, &mut pts);
     }
     (!pts.is_empty()).then(|| hull_of(pts))
 }
 
 fn hull_of(pts: Vec<Point>) -> Hull {
+    let members = pts.len() / 4;
     let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
     for p in &pts {
         x0 = x0.min(p.x);
@@ -150,6 +159,7 @@ fn hull_of(pts: Vec<Point>) -> Hull {
             width: x1 - x0,
             height: y1 - y0,
         },
+        members,
     }
 }
 

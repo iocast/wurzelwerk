@@ -65,6 +65,32 @@ impl Person {
             (None, None) => String::new(),
         }
     }
+
+    /// Where the person stands in `year` (timeline). Without a birth year the person
+    /// cannot be placed in time and counts as living until a known death year.
+    pub fn era(&self, year: i32) -> Era {
+        if year_num(&self.born).is_some_and(|b| year < b) {
+            Era::Unborn
+        } else if year_num(&self.died).is_some_and(|d| year >= d) {
+            Era::Dead
+        } else {
+            Era::Living
+        }
+    }
+
+    /// Alive at some point in `from..=to` (timeline range). Unknown dates never hide anyone.
+    pub fn lived_within(&self, from: i32, to: i32) -> bool {
+        year_num(&self.born).is_none_or(|b| b <= to)
+            && year_num(&self.died).is_none_or(|d| d >= from)
+    }
+}
+
+/// A person's state in a given year of the timeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Era {
+    Unborn,
+    Living,
+    Dead,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -218,6 +244,25 @@ pub fn year_of(s: &str) -> Option<String> {
                 best = Some(cur.clone());
             }
             cur.clear();
+        }
+    }
+    best
+}
+
+/// [`year_of`] as a number, without allocating (called per card on every redraw).
+pub fn year_num(s: &str) -> Option<i32> {
+    let mut best = None;
+    let (mut value, mut digits) = (0i32, 0);
+    for b in s.bytes().chain(std::iter::once(b' ')) {
+        if b.is_ascii_digit() {
+            // long digit runs wrap; only runs of exactly four digits are kept
+            value = value.wrapping_mul(10).wrapping_add(i32::from(b - b'0'));
+            digits += 1;
+        } else {
+            if digits == 4 {
+                best = Some(value);
+            }
+            (value, digits) = (0, 0);
         }
     }
     best

@@ -16,6 +16,8 @@ tool-switch-workspaces = Arbeitsbereiche wechseln oder erstellen
 tool-search-placeholder = Personen suchen…  Strg+F
 tool-light-mode = Heller Modus
 tool-dark-mode = Dunkler Modus
+tool-timeline = Zeitleiste
+tool-timeline-tooltip = Das Brett so zeigen, wie es in einem gewählten Jahr aussah
 
 ## board overlays
 
@@ -32,6 +34,13 @@ hint-name-line = Die neue Linie rechts im Bereich benennen
 empty-board-title = Starte dein Familienbrett
 empty-board-body = Füge die erste Person hinzu, verbinde dann Verwandte und fasse sie in Sippen zusammen.
 empty-board-add-person = Person hinzufügen
+timeline-play = Abspielen
+timeline-pause = Anhalten
+timeline-close = Zeitleiste schliessen
+timeline-living = { $count ->
+        [one] { $count } lebt
+       *[other] { $count } leben
+    }
 
 ## sidebar
 
@@ -154,6 +163,7 @@ default-clan-name = Sippe { $number }
 notice-select-clan = Eine Sippe in der Seitenleiste wählen, dann Personen anklicken, um sie hinzuzufügen/zu entfernen.
 notice-select-person = Zuerst eine Person auswählen.
 notice-drop-files = Eine Person auswählen und Dateien darauf ziehen, um sie anzuhängen.
+notice-no-dates = Für die Zeitleiste bei Personen Geburts- oder Todesjahre eintragen.
 
 ## confirmation
 

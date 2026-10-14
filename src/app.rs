@@ -25,9 +25,10 @@ use crate::notes::{self, Book, NoteKey};
 use crate::layout;
 use crate::routing::Routes;
 use crate::shell::SettingsPage;
+use crate::timeline::RangeSlider;
 use crate::model::{
-    CLAN_BOX_H, CLAN_BOX_W, Clan, Data, FileRec, Id, LINK_PRESETS, Link, LinkLabelPosition, LinkStyle, NODE_H, NODE_W,
-    PALETTE, Person, link_style, new_id,
+    CLAN_BOX_H, CLAN_BOX_W, Clan, Data, Era, FileRec, Id, LINK_PRESETS, Link, LinkLabelPosition, LinkStyle, NODE_H, NODE_W,
+    PALETTE, Person, link_style, new_id, year_num,
 };
 use crate::spatial::{self, Grid, Hull};
 use crate::store::{CLANS, Cmd, Db, FILES, LINKS, PEOPLE};
@@ -42,6 +43,8 @@ const MAX_LINES_LIST: usize = 100;
 /// Notices (toasts) disappear after this long.
 const NOTICE_TTL: Duration = Duration::from_secs(6);
 const SEARCH_ID: &str = "people-search";
+/// Playing the timeline advances one year per step.
+const TIMELINE_STEP: Duration = Duration::from_millis(90);
 
 // ---------------------------------------------------------------------------
 // config / boot
@@ -164,6 +167,11 @@ pub struct App {
     pub with_notes: HashSet<Id>,
     /// Person ids that have attached files (board indicator).
     pub with_files: HashSet<Id>,
+    /// Timeline range `(from, to)`: the board shows the people alive at some point in it
+    /// and fades those who died by `to`. `None` = timeline closed, everyone shown.
+    pub years: Option<(i32, i32)>,
+    /// The timeline runs forward on its own.
+    pub playing: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -178,6 +186,12 @@ pub enum Message {
     ZoomStep(f32),
     ZoomReset,
     ToggleSidebar,
+    // timeline
+    ToggleTimeline,
+    /// New timeline range (from, to).
+    SetYears(i32, i32),
+    TogglePlay,
+    TimelineStep,
     /// Handled by the shell (light / dark), not by the workspace.
     ToggleTheme,
     /// Single-key board shortcut; ignored while a note is open or a dialog is shown.
@@ -319,6 +333,8 @@ impl App {
             books: Vec::new(),
             with_notes: HashSet::new(),
             with_files: HashSet::new(),
+            years: None,
+            playing: false,
         };
         app.books = notes::scan_books(&app.cfg.project);
         app.with_notes.extend(notes::noted_people(&app.cfg.project));
@@ -366,6 +382,9 @@ impl App {
         {
             subs.push(iced::time::every(Duration::from_millis(400)).map(|_| Message::Tick));
         }
+        if self.playing {
+            subs.push(iced::time::every(TIMELINE_STEP).map(|_| Message::TimelineStep));
+        }
         if let Some(note) = &self.note {
             subs.push(note.editor.subscription().map(Message::NoteEditor));
         }
@@ -390,7 +409,8 @@ impl App {
         let mut hit = None;
         self.grid.query(probe, |i| {
             let p = &self.data.people[i as usize];
-            if world.x >= p.x
+            if self.shown(p)
+                && world.x >= p.x
                 && world.x <= p.x + NODE_W
                 && world.y >= p.y
                 && world.y <= p.y + NODE_H
@@ -401,15 +421,79 @@ impl App {
         hit
     }
 
+    /// On the board: alive at some point in the timeline range (always, with the timeline closed).
+    pub fn shown(&self, p: &Person) -> bool {
+        self.years.is_none_or(|(from, to)| p.lived_within(from, to))
+    }
+
+    /// Died by the end of the timeline range: drawn faded.
+    pub fn faded(&self, p: &Person) -> bool {
+        self.years.is_some_and(|(_, to)| p.era(to) == Era::Dead)
+    }
+
+    /// A line is drawn while both of its people are shown, and a line whose name holds a
+    /// year ("married 1789") once the range reaches that year.
+    pub fn link_shown(&self, link: &Link) -> bool {
+        let Some((_, to)) = self.years else {
+            return true;
+        };
+        year_num(&link.label).is_none_or(|since| to >= since)
+            && [&link.from, &link.to]
+                .into_iter()
+                .all(|id| self.data.person(id).is_some_and(|p| self.shown(p)))
+    }
+
+    /// First and last year mentioned in any birth or death date.
+    pub fn year_span(&self) -> Option<(i32, i32)> {
+        self.data
+            .people
+            .iter()
+            .flat_map(|p| [year_num(&p.born), year_num(&p.died)])
+            .flatten()
+            .fold(None, |span, y| match span {
+                None => Some((y, y)),
+                Some((first, last)) => Some((y.min(first), y.max(last))),
+            })
+    }
+
     // -----------------------------------------------------------------------
     // derived data
     // -----------------------------------------------------------------------
 
     fn rebuild_all(&mut self) {
         self.grid = Grid::build(&self.data.people);
-        self.hulls = spatial::all_hulls(&self.data.people, &self.data.clans);
+        self.rebuild_hulls();
         self.routes.sync(&self.data);
         self.recount();
+    }
+
+    /// Hulls of all clans around the people shown in the timeline range.
+    fn rebuild_hulls(&mut self) {
+        self.hulls = spatial::all_hulls(
+            self.data.people.iter().filter(|p| self.shown(p)),
+            &self.data.clans,
+        );
+    }
+
+    /// Moves the timeline range (`from`, `to`); drops a selection that is no longer shown.
+    fn set_years(&mut self, years: Option<(i32, i32)>) {
+        self.years = years.map(|(from, to)| (from.min(to), from.max(to)));
+        self.rebuild_hulls();
+        if self.selected_person().is_some_and(|p| !self.shown(p)) {
+            self.flush_dirty();
+            self.selected = None;
+        }
+        if let Some(id) = &self.selected_link
+            && self
+                .data
+                .links
+                .iter()
+                .find(|link| link.id == *id)
+                .is_some_and(|link| !self.link_shown(link))
+        {
+            self.selected_link = None;
+            self.selected_link_vertex = None;
+        }
     }
 
     fn recount(&mut self) {
@@ -423,7 +507,7 @@ impl App {
 
     fn rebuild_hulls_for(&mut self, clans: &[Id]) {
         for c in clans {
-            match spatial::clan_hull(&self.data.people, c) {
+            match spatial::clan_hull(self.data.people.iter().filter(|p| self.shown(p)), c) {
                 Some(h) => {
                     self.hulls.insert(c.clone(), h);
                 }
@@ -546,6 +630,10 @@ impl App {
                     | Message::FitToWindow
                     | Message::WindowResized(_)
                     | Message::ToggleSidebar
+                    | Message::ToggleTimeline
+                    | Message::SetYears(..)
+                    | Message::TogglePlay
+                    | Message::TimelineStep
             );
         let notice = self.notice.clone();
         let task = self.handle(message);
@@ -611,6 +699,38 @@ impl App {
                 self.show_sidebar = !self.show_sidebar;
                 self.relayout();
             }
+            Message::ToggleTimeline => {
+                self.playing = false;
+                if self.years.is_some() {
+                    self.set_years(None);
+                } else if let Some(span) = self.year_span() {
+                    // opens on the full tree; play or drag the ends to watch it grow
+                    self.set_years(Some(span));
+                } else {
+                    self.notice = Some(t("notice-no-dates").into());
+                }
+            }
+            Message::SetYears(from, to) => {
+                self.playing = false;
+                self.set_years(Some((from, to)));
+            }
+            Message::TogglePlay => {
+                if let (Some((from, to)), Some((_, last))) = (self.years, self.year_span()) {
+                    self.playing = !self.playing;
+                    // played to the end: start again from the left end of the range
+                    if self.playing && to >= last {
+                        self.set_years(Some((from, from)));
+                    }
+                }
+            }
+            Message::TimelineStep => match (self.years, self.year_span()) {
+                (Some((from, to)), Some((_, last))) if self.playing => {
+                    let next = (to + 1).min(last);
+                    self.playing = next < last;
+                    self.set_years(Some((from, next)));
+                }
+                _ => self.playing = false,
+            },
             Message::ToggleTheme => {}
             Message::FocusSearch => return operation::focus(SEARCH_ID),
             Message::Shortcut(msg) => {
@@ -1318,7 +1438,12 @@ impl App {
             && let Some(p) = self.data.person_mut(&id)
         {
             edit(p);
+            let clans = p.clans.clone();
             self.dirty = Some(id);
+            if self.years.is_some() {
+                // new dates can move the person in or out of the timeline range
+                self.rebuild_hulls_for(&clans);
+            }
         }
     }
 
@@ -1457,6 +1582,14 @@ impl App {
                 .align_bottom(Length::Fill)
                 .padding(14),
         );
+        if let Some(years) = self.years {
+            layers = layers.push(
+                container(self.view_timeline(years))
+                    .align_left(Length::Fill)
+                    .align_bottom(Length::Fill)
+                    .padding(14),
+            );
+        }
         if let Some(notice) = &self.notice {
             layers = layers.push(
                 container(
@@ -1549,6 +1682,73 @@ impl App {
             .align_y(alignment::Vertical::Center),
         )
         .padding(4)
+        .style(ui::floating)
+        .into()
+    }
+
+    /// Range slider (from – to) with play / pause and the number of people alive at `to`.
+    fn view_timeline(&self, (from, to): (i32, i32)) -> Element<'_, Message> {
+        let (first, last) = self.year_span().unwrap_or((from, to));
+        let living = self
+            .data
+            .people
+            .iter()
+            .filter(|p| p.era(to) == Era::Living)
+            .count();
+        let play = tip_key(
+            button(icon(if self.playing { "❚❚" } else { "▶" }).size(13))
+                .padding([5, 10])
+                .style(ui::icon)
+                .on_press(Message::TogglePlay),
+            if self.playing {
+                t("timeline-pause")
+            } else {
+                t("timeline-play")
+            },
+            "Space",
+        );
+        // leaves room for the zoom controls on the right
+        let width = (self.canvas_size.width - 260.0).clamp(380.0, 800.0);
+        let range = if from == to {
+            to.to_string()
+        } else {
+            format!("{from} – {to}")
+        };
+        container(
+            row![
+                play,
+                text(range)
+                    .size(16)
+                    .font(ui::BOLD)
+                    .width(Length::Fixed(112.0)),
+                text(first.to_string()).size(11).color(ui::pal().subtle),
+                canvas(RangeSlider {
+                    first,
+                    last,
+                    from: from.clamp(first, last),
+                    to: to.clamp(first, last),
+                })
+                .width(Length::Fill)
+                .height(Length::Fixed(24.0)),
+                text(last.to_string()).size(11).color(ui::pal().subtle),
+                vrule(18.0),
+                text(tf("timeline-living", &[("count", living.into())]))
+                    .size(12)
+                    .color(ui::pal().muted),
+                tip_key(
+                    button(icon("✕").size(12))
+                        .padding([4, 8])
+                        .style(ui::icon)
+                        .on_press(Message::ToggleTimeline),
+                    t("timeline-close"),
+                    "T",
+                ),
+            ]
+            .spacing(10)
+            .align_y(alignment::Vertical::Center),
+        )
+        .width(Length::Fixed(width))
+        .padding([4, 8])
         .style(ui::floating)
         .into()
     }
@@ -1702,6 +1902,14 @@ impl App {
                     .on_press(Message::FitToWindow),
                 t("tool-fit-to-window"),
                 "F",
+            ),
+            tip_key(
+                button(icon_label("◷", t("tool-timeline")))
+                    .padding([6, 11])
+                    .style(ui::segment(self.years.is_some()))
+                    .on_press(Message::ToggleTimeline),
+                t("tool-timeline-tooltip"),
+                "T",
             ),
         ]
         .spacing(2);
@@ -2974,6 +3182,7 @@ fn shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messa
         Key::Named(Named::Escape) => Some(Message::Escape),
         Key::Named(Named::Delete) => Some(Message::DeleteKey),
         Key::Named(Named::Enter) => Some(Message::EnterKey),
+        Key::Named(Named::Space) => Some(Message::Shortcut(Box::new(Message::TogglePlay))),
         Key::Character(c) if modifiers.command() => match c {
             "f" => Some(Message::FocusSearch),
             "b" => Some(Message::ToggleSidebar),
@@ -2987,6 +3196,7 @@ fn shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messa
                 "p" => Message::Tool(Tool::AddPerson),
                 "c" => Message::Tool(Tool::Connect),
                 "f" => Message::FitToWindow,
+                "t" => Message::ToggleTimeline,
                 "+" | "=" => Message::ZoomStep(1.25),
                 "-" => Message::ZoomStep(1.0 / 1.25),
                 "0" => Message::ZoomReset,

@@ -43,7 +43,12 @@ cargo run --release -- --demo 40x250         # empty workspace + 10 000 generate
 * All RedDB code is in `src/store.rs` (`Store`).
 
 ## UI
-Toolbar: sidebar toggle · workspace switcher · tools (Select · Clan · Person · Connect) · Auto-layout · Fit · Search · light/dark · Settings
+Toolbar: sidebar toggle · workspace switcher · tools (Select · Clan · Person · Connect) · Auto-layout · Fit · Timeline · Search · light/dark · Settings
+Timeline (`T`): a year range slider under the board (drag either end, or the range between them to shift it) with
+play / pause (`Space`, moves the right end forward) shows everyone alive at some point in the range – people appear in
+their birth year, disappear once they died before the left end and are faded when they died by the right end. Lines
+appear while both people are shown (lines naming a year, e.g. `married 1789`, from that year) and clan hulls follow
+their visible members. Cards keep their place; people without dates are always shown.
 Left (collapsible sections, hide with Ctrl+B): clans (colour, member count, + New clan), people (avatar, years; filtered by search) and books
 Board: people cards (accent bar in the first clan's colour), orthogonal lines with names, clans as coloured hulls (a person can be in several clans);
 clans without members as a dashed box with their name (drag to move, click to open), floating zoom controls, a hint while a tool is active, toasts for notices and a start card on an empty board
@@ -53,7 +58,7 @@ Deleting a person, clan or book page asks for confirmation (Enter confirms, Esc 
 Status: save state · `N people · M clans · L lines` · zoom
 Appearance: System / Light / Dark (*Settings → General*, or the moon/sun button in the toolbar). Colours live in `src/ui.rs`.
 
-Keyboard (when no text field has focus): `V` Select · `G` Clan · `P` Person · `C` Connect · `F` fit · `+`/`-`/`0` zoom ·
+Keyboard (when no text field has focus): `V` Select · `G` Clan · `P` Person · `C` Connect · `F` fit · `T` timeline · `Space` play / pause · `+`/`-`/`0` zoom ·
 `Ctrl+F` search · `Ctrl+B` sidebar · `Ctrl+,` settings · `Del` delete selection · `Esc` cancel / deselect
 
 Connect: drag from a person (Connect tool) or from the ◯ handle of the selected person onto another person, then name the line.

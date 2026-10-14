@@ -24,6 +24,7 @@ mod settings;
 mod shell;
 mod spatial;
 mod store;
+mod timeline;
 mod ui;
 mod update;
 

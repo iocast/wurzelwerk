@@ -636,8 +636,7 @@ fn draw_hulls(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
         frame.fill(&path, Color { a: 0.16, ..color });
 
         if cam.zoom >= 0.08 {
-            let count = app.clan_counts.get(&clan.id).copied().unwrap_or(0);
-            let label = format!("{} · {count}", clan.name);
+            let label = format!("{} · {}", clan.name, hull.members);
             let w = label.chars().count() as f32 * 6.6 + 18.0;
             let center = cam.to_screen(Point::new(
                 hull.bbox.x + clan.label_offset[0] + w / (2.0 * cam.zoom),
@@ -720,9 +719,17 @@ fn draw_empty_clans(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle)
 
 fn draw_density(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
     let mut buckets: [Vec<Rectangle>; 4] = Default::default();
-    app.grid.cells_in(view, |cell, count| {
+    app.grid.cells_in(view, |cell, nodes| {
+        let count = match app.years {
+            None => nodes.len(),
+            Some(_) => nodes
+                .iter()
+                .filter(|&&i| app.shown(&app.data.people[i as usize]))
+                .count(),
+        };
         let bucket = match count {
-            0..=3 => 0,
+            0 => return,
+            1..=3 => 0,
             4..=15 => 1,
             16..=63 => 2,
             _ => 3,
@@ -771,7 +778,7 @@ fn link_label_hit<'a>(
     }
     let text_size = LABEL_TEXT * cam.zoom.min(1.4);
     app.data.links.iter().rev().find_map(|link| {
-        if link.label.is_empty() {
+        if link.label.is_empty() || !app.link_shown(link) {
             return None;
         }
         let route = app.routes.get(&link.id)?;
@@ -820,6 +827,9 @@ fn link_segment_hit<'a>(
         let Some(route) = app.routes.get(&link.id) else {
             continue;
         };
+        if !app.link_shown(link) {
+            continue;
+        }
         let bbox = route.bbox;
         if world.x < bbox.x - slack
             || world.x > bbox.x + bbox.width + slack
@@ -957,11 +967,7 @@ fn clan_label_hit<'a>(app: &'a App, cam: &Camera, pos: Point) -> Option<&'a crat
         if hull.points.len() < 3 {
             return false;
         }
-        let label = format!(
-            "{} · {}",
-            clan.name,
-            app.clan_counts.get(&clan.id).copied().unwrap_or(0)
-        );
+        let label = format!("{} · {}", clan.name, hull.members);
         let width = label.chars().count() as f32 * 6.6 + 18.0;
         let center = cam.to_screen(Point::new(
             hull.bbox.x + clan.label_offset[0] + width / (2.0 * cam.zoom),
@@ -1580,6 +1586,9 @@ fn draw_edges(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
         let Some(r) = app.routes.get(&link.id) else {
             continue;
         };
+        if !app.link_shown(link) {
+            continue;
+        }
         let label = (show_labels && !link.label.is_empty()).then(|| label_layout(link, r));
         let mut bbox = r.bbox;
         if let Some((at, centered)) = label {
@@ -1748,6 +1757,7 @@ fn draw_nodes(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
             && p.x <= view.x + view.width
             && p.y + NODE_H >= view.y
             && p.y <= view.y + view.height
+            && app.shown(p)
         {
             visible.push(i as usize);
         }
@@ -1897,6 +1907,18 @@ fn draw_nodes(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
             let path = Path::new(|b| points.iter().for_each(|p| b.rectangle(*p, block)));
             frame.fill(&path, Color { a: 0.75, ..color });
         }
+    }
+
+    // timeline: people who died within the chosen range fade into the board
+    if app.years.is_some() {
+        let radius = if z >= LOD_DETAIL { 8.0 * z } else { 0.0 };
+        let veil = Path::new(|b| {
+            for &i in visible.iter().filter(|&&i| app.faded(&people[i])) {
+                let s = cam.to_screen(Point::new(people[i].x, people[i].y));
+                rounded_rect(b, s, size, radius);
+            }
+        });
+        frame.fill(&veil, ui::alpha(ui::pal().board, 0.62));
     }
 
     // selection: soft halo + crisp accent outline

@@ -16,6 +16,8 @@ tool-switch-workspaces = Switch or create workspaces
 tool-search-placeholder = Search people…  Ctrl+F
 tool-light-mode = Light mode
 tool-dark-mode = Dark mode
+tool-timeline = Timeline
+tool-timeline-tooltip = Show the board as it was in a chosen year
 
 ## board overlays
 
@@ -32,6 +34,10 @@ hint-name-line = Name the new line in the panel on the right
 empty-board-title = Start your family board
 empty-board-body = Add the first person, then connect relatives and group them into clans.
 empty-board-add-person = Add person
+timeline-play = Play
+timeline-pause = Pause
+timeline-close = Close timeline
+timeline-living = { $count } living
 
 ## sidebar
 
@@ -154,6 +160,7 @@ default-clan-name = Clan { $number }
 notice-select-clan = Select a clan in the sidebar, then click people to add/remove them.
 notice-select-person = Select a person first.
 notice-drop-files = Select a person, then drop files to attach them.
+notice-no-dates = Add birth or death years to people to use the timeline.
 
 ## confirmation
 
