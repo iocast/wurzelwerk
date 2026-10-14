@@ -41,10 +41,10 @@ Format: Keep a Changelog (https://keepachangelog.com), versioning: Semantic Vers
 ### Fixed
 ```
 
-Find the latest real release. Release candidates (`-rc.N`) do not count, because their notes are still in `[Unreleased]`:
+Find the latest tag. Release candidates (`-rc.N`) count: each has its own `[X.Y.Z-rc.N]` section, so `[Unreleased]` only holds what came after it (the final release later collects the candidates' entries itself):
 
 ```bash
-git describe --tags --abbrev=0 --match "v*" --exclude "*-rc.*"
+git describe --tags --abbrev=0 --match "v*"
 ```
 
 If this fails, there is no release yet. In that case, treat the whole history as unreleased and focus on the most recent work.
@@ -122,7 +122,7 @@ After editing, show the user:
 1. The resulting `[Unreleased]` section.
 2. The predicted next version: the latest release tag plus the highest effect from the table above. Example: `v1.3.0 -> v1.3.1 (only fixes)`. If there are breaking changes or removals, say so and mention that `new major` is needed for a new major version.
 3. The changes you deliberately left out, briefly, so the user can ask to include them.
-4. The next step: `.\scripts\release.ps1 rc` for a test build or `.\scripts\release.ps1 new` for the release. Add `patch`, `minor` or `major` to choose the number explicitly.
+4. The next step: `.\scripts\release.ps1 rc` for a release candidate (a pre-release with its own changelog section) or `.\scripts\release.ps1 new` for the release. Add `patch`, `minor` or `major` to choose the number explicitly.
 
 ## Example
 

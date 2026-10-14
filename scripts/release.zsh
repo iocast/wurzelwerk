@@ -11,10 +11,11 @@
 #
 # Commands
 #   list       Show the latest tags
-#   rc         Test build: tags vX.Y.Z-rc.N with the notes from [Unreleased]. Nothing is modified
-#              or committed - see the warning it prints about the version-check workflow.
-#   new        Release: renames [Unreleased] to [X.Y.Z] - <date>, syncs Cargo.toml's version,
-#              commits CHANGELOG.md/Cargo.toml/Cargo.lock, tags vX.Y.Z, pushes.
+#   rc         Release candidate: like 'new', but renames [Unreleased] to [X.Y.Z-rc.N] - <date>,
+#              sets Cargo.toml to X.Y.Z-rc.N, tags vX.Y.Z-rc.N. Published as a GitHub pre-release.
+#   new        Release: renames [Unreleased] to [X.Y.Z] - <date> (after candidates: their entries
+#              plus [Unreleased]), syncs Cargo.toml's version, commits CHANGELOG.md/Cargo.toml/
+#              Cargo.lock, tags vX.Y.Z, pushes.
 #   rollback   Delete a tag locally and on the remote, and try to remove its GitHub Release
 #              (default: highest tag)
 #   retag      Move a tag to HEAD and force-push it (rebuild the same version)
@@ -25,7 +26,8 @@
 #   1. An explicit version: X.Y.Z
 #   2. A [X.Y.Z] section in CHANGELOG.md that is newer than the latest release tag (written by
 #      hand or left over from a rollback)
-#   3. Otherwise Cargo.toml's current version is bumped:
+#   3. While Cargo.toml is at a candidate X.Y.Z-rc.N: X.Y.Z (the next candidate, or the release)
+#   4. Otherwise Cargo.toml's current version is bumped:
 #        patch   1.3.0 -> 1.3.1    (argument "patch" or --bump patch)
 #        minor   1.3.0 -> 1.4.0    (argument "minor" or --bump minor)
 #        major   1.3.0 -> 2.0.0    (argument "major" or --bump major - only when given explicitly)
@@ -83,15 +85,18 @@ EOF
       cat <<EOF
 
 rc [patch|minor|major|X.Y.Z] [-y|--yes]
-  Creates the next release candidate tag vX.Y.Z-rc.N and pushes it.
-  - Version is chosen like for 'new'; N counts up per version (rc.1, rc.2, ...).
-  - Tag message = [Unreleased] section (or [X.Y.Z] if it exists). Empty is allowed.
-  - $CHANGELOG_FILE and $CARGO_TOML_FILE are NOT modified, nothing is committed.
-  - The GitHub Actions release workflow aborts the build unless the pushed tag's version
-    matches $CARGO_TOML_FILE's version and $CHANGELOG_FILE's top section exactly (rc suffix
-    included). Since this command changes neither file, the pipeline will usually fail its
-    version check - this is only useful to sanity-check the tag/push mechanics, not to run a
-    real test build. Use 'new' for a build that actually passes CI.
+  Creates the next release candidate vX.Y.Z-rc.N. It is a tag and a GitHub release, so it is
+  recorded like one:
+  - Version is chosen like for 'new' (while $CARGO_TOML_FILE is at X.Y.Z-rc.N: X.Y.Z again);
+    N counts up per version (rc.1, rc.2, ...).
+  - Renames [Unreleased] to [X.Y.Z-rc.N] - <today> (or uses that section if it is left over
+    from a rollback), sets $CARGO_TOML_FILE to X.Y.Z-rc.N, commits "Release vX.Y.Z-rc.N",
+    pushes, tags with the section as message and pushes the tag.
+  - Fails if the section has no entries: each candidate lists what changed since the last.
+  - The release workflow publishes it as a pre-release: never marked latest, never offered to
+    installed apps as an update, and without the MSI (its version must be numeric; Windows
+    gets the setup .exe).
+  - 'new' later collects the entries of all candidates of X.Y.Z into [X.Y.Z].
 
 EOF
       ;;
@@ -103,6 +108,7 @@ new [patch|minor|major|X.Y.Z] [-y|--yes]
   1. Picks the version:
        - X.Y.Z if given
        - else an untagged [X.Y.Z] section in the changelog (hand-written or after a rollback)
+       - else X.Y.Z while Cargo.toml is at a candidate X.Y.Z-rc.N
        - else bumps Cargo.toml's current version:
            patch -> 1.3.0 -> 1.3.1
            minor -> 1.3.0 -> 1.4.0
@@ -111,7 +117,9 @@ new [patch|minor|major|X.Y.Z] [-y|--yes]
                     ### Added / Changed / Deprecated / Removed or BREAKING  -> minor
                     anything else                                           -> patch
   2. If notes come from [Unreleased]: renames it to [X.Y.Z] - <today>, adds a new empty
-     [Unreleased], and updates the compare links at the bottom of the changelog.
+     [Unreleased], and updates the compare links at the bottom of the changelog. After release
+     candidates, [X.Y.Z] gets the entries of all [X.Y.Z-rc.N] sections plus [Unreleased],
+     grouped by type; the candidates' sections stay below it as history.
   3. If Cargo.toml's version differs from X.Y.Z, updates it (and runs 'cargo check' to refresh
      Cargo.lock).
   4. Re-checks that Cargo.toml's version and the changelog's top section agree - the same
@@ -130,8 +138,8 @@ rollback [tag] [-y|--yes]
   If the GitHub CLI ('gh') is installed and a GitHub Release exists for that tag, offers to
   delete it too. Without 'gh', delete the release manually if one was published. Built
   artifacts already downloaded by others stay untouched.
-  $CHANGELOG_FILE and $CARGO_TOML_FILE are not touched: running 'new' again re-releases the
-  same version.
+  $CHANGELOG_FILE and $CARGO_TOML_FILE are not touched: running 'new' (or 'rc' for a
+  candidate) again re-releases the same version.
 
 EOF
       ;;
@@ -176,7 +184,7 @@ USAGE
 
 COMMANDS
   list                 Show the latest 15 tags (default)
-  rc   [version]       Test build: tag vX.Y.Z-rc.N, notes from [Unreleased], nothing committed
+  rc   [version]       Candidate: [Unreleased] -> [X.Y.Z-rc.N], sync Cargo.toml, commit, tag, push
   new  [version]       Release: [Unreleased] -> [X.Y.Z], sync Cargo.toml, commit, tag vX.Y.Z, push
   rollback [tag]       Delete a tag locally + on the remote, try to remove its GitHub Release
                        (default: highest tag)
@@ -201,11 +209,11 @@ OPTIONS
   -h, --help                      Show help
 
 EXAMPLES (latest release v1.2.3)
-  $SELF rc                   test build  -> v1.3.0-rc.1
+  $SELF rc                   candidate   -> v1.3.0-rc.1, then rc.2, ...; new -> v1.3.0
   $SELF new                  release     -> v1.3.0
   $SELF new patch            release     -> v1.2.4   (only last number)
   $SELF new minor            release     -> v1.3.0   (second last number)
-  $SELF rc minor             test build  -> v1.3.0-rc.1
+  $SELF rc minor             candidate   -> v1.3.0-rc.1
   $SELF rollback v1.3.0-rc.1
   $SELF retag -y
 
@@ -515,8 +523,8 @@ resolve_target() {
     latest_final_sortkey=$LATEST_SORTKEY
   fi
 
-  ver_parse "$current_cargo_version" || die "$CARGO_TOML_FILE has an unexpected version '$current_cargo_version' (expected X.Y.Z)."
-  local cur_major=$VER_MAJOR cur_minor=$VER_MINOR cur_patch=$VER_PATCH
+  ver_parse "$current_cargo_version" || die "$CARGO_TOML_FILE has an unexpected version '$current_cargo_version' (expected X.Y.Z or X.Y.Z-rc.N)."
+  local cur_major=$VER_MAJOR cur_minor=$VER_MINOR cur_patch=$VER_PATCH cur_is_rc=$VER_IS_RC cur_core=$VER_CORE
 
   UNRELEASED_BODY=()
   if find_section 'Unreleased'; then
@@ -544,13 +552,27 @@ resolve_target() {
       core=$top_core
       reason="untagged section [$core] in $CHANGELOG_FILE"
       [[ $BUMP != auto ]] && warn "'$BUMP' ignored: $CHANGELOG_FILE already contains the untagged section [$core]. Pass an explicit X.Y.Z to override."
+    elif (( cur_is_rc )) && [[ $BUMP == auto ]]; then
+      # the next candidate or the final release of the version being tested
+      core=$cur_core
+      reason="release candidates of $core in progress ($CARGO_TOML_FILE $current_cargo_version)"
     else
       local level=$BUMP
       [[ $BUMP == auto ]] && level=$(auto_bump)
+      local from="$CARGO_TOML_FILE $current_cargo_version"
+      if (( cur_is_rc )); then
+        # during release candidates, bump from the last release, not from the candidate
+        cur_major=0; cur_minor=0; cur_patch=0
+        from="the latest release (none)"
+        if (( have_latest_final )) && ver_parse "$latest_final_tag"; then
+          cur_major=$VER_MAJOR; cur_minor=$VER_MINOR; cur_patch=$VER_PATCH
+          from="the latest release $latest_final_tag"
+        fi
+      fi
       core=$(step_version "$cur_major" "$cur_minor" "$cur_patch" "$level")
       local how='requested'
       [[ $BUMP == auto ]] && how='auto from [Unreleased]'
-      reason="$level bump ($how) from $CARGO_TOML_FILE $current_cargo_version"
+      reason="$level bump ($how) from $from"
     fi
   fi
 
@@ -570,15 +592,63 @@ resolve_target() {
   (( have_latest_final )) && TARGET_LATEST_FINAL_TAG=$latest_final_tag
 }
 
-# [Unreleased] -> [X.Y.Z] - date, plus a fresh empty [Unreleased] on top, plus compare links.
+# Sets CANDIDATE_NAMES to the [X.Y.Z-rc.N] sections of version $1, oldest first.
+candidate_sections() {
+  local core=$1 line
+  local -a numbers=()
+  for line in "${CHANGELOG_LINES[@]}"; do
+    if [[ $line =~ '^##[[:space:]]+\[v?([0-9]+\.[0-9]+\.[0-9]+)-rc\.([0-9]+)\]' ]] && [[ ${match[1]} == $core ]]; then
+      numbers+=(${match[2]})
+    fi
+  done
+  CANDIDATE_NAMES=()
+  local nr
+  for nr in ${(on)numbers}; do CANDIDATE_NAMES+=("$core-rc.$nr"); done
+}
+
+# Adds the entries of WORK_BODY to MERGE_GROUPS, keyed by "### Type" (MERGE_SEEN keeps the order).
+merge_collect() {
+  local current='(none)' line
+  for line in "${WORK_BODY[@]}"; do
+    if [[ $line =~ '^###[[:space:]]+(.+)$' ]]; then
+      current=${match[1]%%[[:space:]]##}
+      continue
+    fi
+    [[ -z ${line//[[:space:]]/} ]] && continue
+    if (( ${+MERGE_GROUPS[$current]} )); then
+      MERGE_GROUPS[$current]+=$'\n'"$line"
+    else
+      MERGE_SEEN+=("$current")
+      MERGE_GROUPS[$current]=$line
+    fi
+  done
+}
+
+# Sets MERGED_BODY from MERGE_GROUPS, grouped by type in Keep a Changelog order.
+merge_finish() {
+  local -a order=(Added Changed Deprecated Removed Fixed Security) names=()
+  local name
+  (( ${+MERGE_GROUPS[(none)]} )) && names+=('(none)')
+  for name in "${order[@]}"; do (( ${+MERGE_GROUPS[$name]} )) && names+=("$name"); done
+  for name in "${MERGE_SEEN[@]}"; do
+    [[ $name == '(none)' || ${order[(Ie)$name]} -gt 0 ]] || names+=("$name")
+  done
+  MERGED_BODY=()
+  for name in "${names[@]}"; do
+    (( ${#MERGED_BODY} )) && MERGED_BODY+=('')
+    [[ $name != '(none)' ]] && MERGED_BODY+=("### $name")
+    MERGED_BODY+=("${(@f)MERGE_GROUPS[$name]}")
+  done
+}
+
+# [Unreleased] -> [$1] - date with the entries in WORK_BODY, plus a fresh empty [Unreleased] on
+# top, plus compare links ($2 = previous tag).
 update_changelog_for_release() {
   local core=$1 prevtag=$2
   local tag="v$core"
 
   find_section 'Unreleased' || die "No [Unreleased] section found in $CHANGELOG_FILE."
   local ustart=$SECTION_START uend=$SECTION_END
-  get_section_body "$ustart" "$uend"
-  WORK_BODY=("${SECTION_BODY[@]}")
   remove_empty_subsections
   local clean=("${CLEAN_BODY[@]}")
 
@@ -676,93 +746,33 @@ cmd_list() {
   } | column -t -s $'\t'
 }
 
-cmd_rc() {
-  assert_ready
-  read_lines_into_result "$CHANGELOG_PATH" "Run '$SELF init' to create one."
-  CHANGELOG_LINES=("${RESULT_LINES[@]}")
-  read_lines_into_result "$CARGO_TOML_PATH"
-  CARGO_LINES=("${RESULT_LINES[@]}")
-  local current_cargo_version
-  current_cargo_version=$(cargo_version_get) || die "No top-level 'version' field found in $CARGO_TOML_PATH."
-
-  resolve_target "$current_cargo_version"
-
-  git tag --list "v$TARGET_CORE" | grep -qx "v$TARGET_CORE" && die "v$TARGET_CORE is already released. Use an explicit version for another version."
-
-  local max_rc=0 sk tg co maj mn pa isrc rc
-  while IFS='|' read -r sk tg co maj mn pa isrc rc; do
-    [[ $co == $TARGET_CORE && $isrc == 1 ]] || continue
-    (( rc > max_rc )) && max_rc=$rc
-  done < <(version_tags)
-  local n=$(( max_rc + 1 ))
-  local tag="v${TARGET_CORE}-rc.${n}"
-  WORK_BODY=("${TARGET_BODY[@]}")
-  local message
-  message=$(format_tag_message "Release candidate $tag")
-
-  print -r -- ""
-  color "$c_cyan" "Tag:     $tag"
-  print -r -- "Version: $TARGET_REASON"
-  print -r -- "Commit:  $(git log -1 --oneline)"
-  print -r -- "Notes:   $TARGET_SOURCE from $CHANGELOG_FILE ($CHANGELOG_FILE and $CARGO_TOML_FILE are not modified)"
-  print -r -- ""
-  print -r -- "$message"
-
-  if [[ $current_cargo_version != $TARGET_CORE ]]; then
-    warn "$CARGO_TOML_FILE is at $current_cargo_version, not $TARGET_CORE. The release workflow's version check compares the tag ($tag) against $CARGO_TOML_FILE and $CHANGELOG_FILE exactly, so this build will likely fail validation. Use 'new' for a build that actually passes CI."
-  fi
-
-  confirm "Create and push $tag?" || { print -r -- "Aborted."; return; }
-  make_annotated_tag "$tag" "$message"
-  git push "$REMOTE" "refs/tags/$tag" || die "git push failed"
-  color "$c_green" "Pushed $tag - GitHub Actions should start."
-}
-
-cmd_new() {
-  assert_ready
-  read_lines_into_result "$CHANGELOG_PATH" "Run '$SELF init' to create one."
-  CHANGELOG_LINES=("${RESULT_LINES[@]}")
-  read_lines_into_result "$CARGO_TOML_PATH"
-  CARGO_LINES=("${RESULT_LINES[@]}")
-  local current_cargo_version
-  current_cargo_version=$(cargo_version_get) || die "No top-level 'version' field found in $CARGO_TOML_PATH."
-
-  resolve_target "$current_cargo_version"
-  local tag="v$TARGET_CORE"
-
-  git tag --list "$tag" | grep -qx "$tag" && die "Tag $tag already exists. Use 'retag $tag' to rebuild or 'rollback $tag' first."
-  WORK_BODY=("${TARGET_BODY[@]}")
-  has_entries || die "No entries in $TARGET_SOURCE of $CHANGELOG_FILE. Describe your changes there first (or use 'rc' for a test build)."
-
-  local promote_changelog=0 bump_cargo=0
-  (( TARGET_HAS_OWN_SECTION )) || promote_changelog=1
-  [[ $current_cargo_version != $TARGET_CORE ]] && bump_cargo=1
+# Shared by 'rc' and 'new': shows the plan, then writes the changelog section and Cargo.toml's
+# version, commits, tags and pushes - so a candidate is recorded exactly like a release.
+# Reads REL_TAG REL_NAME REL_REASON REL_SOURCE REL_PROMOTE REL_BUMP REL_CURRENT REL_PREV and
+# REL_BODY (array).
+do_release() {
+  local tag=$REL_TAG
   local needs_commit=0
-  (( promote_changelog || bump_cargo )) && needs_commit=1
-
+  (( REL_PROMOTE || REL_BUMP )) && needs_commit=1
   local branch=""
-  WORK_BODY=("${UNRELEASED_BODY[@]}")
-  if (( needs_commit )); then
-    branch=$(assert_can_commit)
-  elif has_entries; then
-    warn "[Unreleased] also has entries - they stay there for the next release."
-  fi
+  (( needs_commit )) && branch=$(assert_can_commit)
 
-  local prev_tag=$TARGET_LATEST_FINAL_TAG
-  local prev_display="-"
-  [[ -n $prev_tag ]] && prev_display=$prev_tag
-  WORK_BODY=("${TARGET_BODY[@]}")
+  WORK_BODY=("${REL_BODY[@]}")
+  local title="Release $tag"
+  [[ $tag == *-rc.* ]] && title="Release candidate $tag"
   local message
-  message=$(format_tag_message "Release $tag")
+  message=$(format_tag_message "$title")
 
+  local prev_display="-"
+  [[ -n $REL_PREV ]] && prev_display=$REL_PREV
   print -r -- ""
-  color "$c_cyan" "Tag:       $tag  (previous release: $prev_display)"
-  print -r -- "Version:   $TARGET_REASON"
-  print -r -- "Commit:    $(git log -1 --oneline)"
-  print -r -- "Notes:     $TARGET_SOURCE from $CHANGELOG_FILE"
-  (( bump_cargo )) && print -r -- "$CARGO_TOML_FILE: $current_cargo_version -> $TARGET_CORE"
-  (( promote_changelog )) && print -r -- "Changelog: [Unreleased] -> [$TARGET_CORE] - $(date +%Y-%m-%d)"
-  (( needs_commit )) && print -r -- "Commit:    'Release $tag' pushed to $branch"
+  color "$c_cyan" "Tag:        $tag  (previous: $prev_display)"
+  print -r -- "Version:    $REL_REASON"
+  print -r -- "Commit:     $(git log -1 --oneline)"
+  print -r -- "Notes:      $REL_SOURCE from $CHANGELOG_FILE"
+  (( REL_BUMP )) && print -r -- "$CARGO_TOML_FILE: $REL_CURRENT -> $REL_NAME"
+  (( REL_PROMOTE )) && print -r -- "Changelog:  [Unreleased] -> [$REL_NAME] - $(date +%Y-%m-%d)"
+  (( needs_commit )) && print -r -- "Commit:     'Release $tag' pushed to $branch"
   print -r -- ""
   print -r -- "$message"
 
@@ -770,14 +780,15 @@ cmd_new() {
 
   local changed_paths=()
 
-  if (( promote_changelog )); then
-    update_changelog_for_release "$TARGET_CORE" "$prev_tag"
+  if (( REL_PROMOTE )); then
+    WORK_BODY=("${REL_BODY[@]}")
+    update_changelog_for_release "$REL_NAME" "$REL_PREV"
     printf '%s\n' "${CHANGELOG_LINES[@]}" > "$CHANGELOG_PATH"
     changed_paths+=("$CHANGELOG_PATH")
   fi
 
-  if (( bump_cargo )); then
-    cargo_version_set "$TARGET_CORE"
+  if (( REL_BUMP )); then
+    cargo_version_set "$REL_NAME"
     printf '%s\n' "${CARGO_LINES[@]}" > "$CARGO_TOML_PATH"
     changed_paths+=("$CARGO_TOML_PATH")
 
@@ -803,6 +814,100 @@ cmd_new() {
   color "$c_green" "Released $tag - GitHub Actions should start the build."
 }
 
+load_release_files() {
+  read_lines_into_result "$CHANGELOG_PATH" "Run '$SELF init' to create one."
+  CHANGELOG_LINES=("${RESULT_LINES[@]}")
+  read_lines_into_result "$CARGO_TOML_PATH"
+  CARGO_LINES=("${RESULT_LINES[@]}")
+  REL_CURRENT=$(cargo_version_get) || die "No top-level 'version' field found in $CARGO_TOML_PATH."
+}
+
+cmd_rc() {
+  assert_ready
+  load_release_files
+  resolve_target "$REL_CURRENT"
+
+  git tag --list "v$TARGET_CORE" | grep -qx "v$TARGET_CORE" && die "v$TARGET_CORE is already released. Use an explicit version for another version."
+
+  local max_rc=0 sk tg co maj mn pa isrc rc
+  while IFS='|' read -r sk tg co maj mn pa isrc rc; do
+    [[ $co == $TARGET_CORE && $isrc == 1 ]] || continue
+    (( rc > max_rc )) && max_rc=$rc
+  done < <(version_tags)
+  REL_NAME="${TARGET_CORE}-rc.$(( max_rc + 1 ))"
+  REL_TAG="v$REL_NAME"
+
+  # a candidate's own section, left over from a rollback, is released as it is
+  REL_PROMOTE=1
+  if find_section "$REL_NAME"; then
+    get_section_body "$SECTION_START" "$SECTION_END"
+    REL_BODY=("${SECTION_BODY[@]}")
+    REL_SOURCE="[$REL_NAME]"
+    REL_PROMOTE=0
+  elif (( TARGET_HAS_OWN_SECTION )); then
+    die "$CHANGELOG_FILE already has a [$TARGET_CORE] section. Release candidates take their notes from [Unreleased]; use 'new' to release $TARGET_CORE."
+  else
+    REL_BODY=("${UNRELEASED_BODY[@]}")
+    REL_SOURCE='[Unreleased]'
+  fi
+  WORK_BODY=("${REL_BODY[@]}")
+  has_entries || die "No entries in $REL_SOURCE of $CHANGELOG_FILE. Describe the changes in this candidate there first (or 'retag' to rebuild the last one)."
+
+  REL_REASON=$TARGET_REASON
+  REL_BUMP=0
+  [[ $REL_CURRENT != $REL_NAME ]] && REL_BUMP=1
+  REL_PREV=""
+  latest_tag 0 && REL_PREV=$LATEST_TAG
+  do_release
+}
+
+cmd_new() {
+  assert_ready
+  load_release_files
+  resolve_target "$REL_CURRENT"
+  REL_NAME=$TARGET_CORE
+  REL_TAG="v$REL_NAME"
+
+  git tag --list "$REL_TAG" | grep -qx "$REL_TAG" && die "Tag $REL_TAG already exists. Use 'retag $REL_TAG' to rebuild or 'rollback $REL_TAG' first."
+
+  # the release lists everything since the last one: its candidates' entries plus
+  # [Unreleased]; the candidates' sections stay in the changelog as history
+  REL_BODY=("${TARGET_BODY[@]}")
+  REL_SOURCE=$TARGET_SOURCE
+  CANDIDATE_NAMES=()
+  (( TARGET_HAS_OWN_SECTION )) || candidate_sections "$TARGET_CORE"
+  if (( ${#CANDIDATE_NAMES} )); then
+    MERGE_GROUPS=(); MERGE_SEEN=()
+    local name sources=()
+    for name in "${CANDIDATE_NAMES[@]}"; do
+      find_section "$name" && get_section_body "$SECTION_START" "$SECTION_END"
+      WORK_BODY=("${SECTION_BODY[@]}")
+      merge_collect
+      sources+=("[$name]")
+    done
+    WORK_BODY=("${UNRELEASED_BODY[@]}")
+    merge_collect
+    merge_finish
+    REL_BODY=("${MERGED_BODY[@]}")
+    REL_SOURCE="${(j: + :)sources} + [Unreleased]"
+  fi
+  WORK_BODY=("${REL_BODY[@]}")
+  has_entries || die "No entries in $REL_SOURCE of $CHANGELOG_FILE. Describe your changes there first (or use 'rc' for a test build)."
+
+  WORK_BODY=("${UNRELEASED_BODY[@]}")
+  if (( TARGET_HAS_OWN_SECTION )) && has_entries; then
+    warn "[Unreleased] also has entries - they stay there for the next release."
+  fi
+
+  REL_REASON=$TARGET_REASON
+  REL_PROMOTE=1
+  (( TARGET_HAS_OWN_SECTION )) && REL_PROMOTE=0
+  REL_BUMP=0
+  [[ $REL_CURRENT != $REL_NAME ]] && REL_BUMP=1
+  REL_PREV=$TARGET_LATEST_FINAL_TAG
+  do_release
+}
+
 cmd_rollback() {
   local tag
   tag=$(resolve_tag_name "$VERSION")
@@ -819,9 +924,9 @@ cmd_rollback() {
   local prev="none"
   latest_tag 0 && prev=$LATEST_TAG
   color "$c_green" "Deleted $tag. Highest tag is now: $prev"
-  if [[ $tag != *-rc.* ]]; then
-    print -r -- "The [${tag#v}] section stays in $CHANGELOG_FILE and the version stays in $CARGO_TOML_FILE - running 'new' again re-releases it."
-  fi
+  local again=new
+  [[ $tag == *-rc.* ]] && again=rc
+  print -r -- "The [${tag#v}] section stays in $CHANGELOG_FILE and the version stays in $CARGO_TOML_FILE - running '$again' again re-releases it."
 }
 
 cmd_retag() {
@@ -873,6 +978,8 @@ EOF
 # ============================================================== main
 
 typeset -ga CHANGELOG_LINES=() CARGO_LINES=() RESULT_LINES=() SECTION_BODY=() WORK_BODY=() CLEAN_BODY=() UNRELEASED_BODY=() TARGET_BODY=()
+typeset -ga REL_BODY=() CANDIDATE_NAMES=() MERGE_SEEN=() MERGED_BODY=()
+typeset -gA MERGE_GROUPS=()
 
 COMMAND=""
 VERSION=""

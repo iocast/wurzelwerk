@@ -707,7 +707,7 @@ fn draw_empty_clans(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle)
         if z >= LOD_DETAIL {
             text(
                 frame,
-                t("empty clan").to_owned(),
+                t("sidebar-empty-clan").to_owned(),
                 Point::new(origin.x + size.width / 2.0, origin.y + size.height * 0.58),
                 11.5 * z,
                 ui::alpha(color, 0.9),

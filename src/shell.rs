@@ -37,10 +37,10 @@ impl SettingsPage {
 
     fn label(self) -> &'static str {
         match self {
-            Self::General => t("General"),
-            Self::Workspace => t("Workspace"),
-            Self::Updates => t("Updates"),
-            Self::About => t("About"),
+            Self::General => t("settings-general"),
+            Self::Workspace => t("settings-workspace"),
+            Self::Updates => t("settings-updates"),
+            Self::About => t("settings-about"),
         }
     }
 
@@ -302,7 +302,7 @@ impl Shell {
                 return Task::perform(
                     async move {
                         let mut dialog = rfd::AsyncFileDialog::new()
-                            .set_title(t("Choose workspace folder"));
+                            .set_title(t("welcome-choose-folder"));
                         if let Some(dir) = Some(start).filter(|p| p.is_dir()) {
                             dialog = dialog.set_directory(dir);
                         }
@@ -322,7 +322,7 @@ impl Shell {
             ShellMessage::SubmitPath => {
                 let input = self.path_input.trim();
                 if input.is_empty() {
-                    self.error = Some(t("Please enter a location.").into());
+                    self.error = Some(t("welcome-enter-location").into());
                 } else {
                     let path = absolute(PathBuf::from(input));
                     return self.open_workspace(path, true, None);
@@ -370,14 +370,14 @@ impl Shell {
                         );
                     }
                     Ok(check) => UpdateState::Done(check),
-                    Err(e) => UpdateState::Failed(tf("Update check failed: {}", &[&e])),
+                    Err(e) => UpdateState::Failed(tf("update-check-failed", &[("error", e.to_string().into())])),
                 };
             }
             ShellMessage::UpdateDownloaded(result) => {
                 if let UpdateState::Downloading(release) = &self.update {
                     self.update = match result {
                         Ok(downloaded) => UpdateState::Ready(release.clone(), downloaded),
-                        Err(e) => UpdateState::Failed(tf("Update failed: {}", &[&e])),
+                        Err(e) => UpdateState::Failed(tf("update-failed", &[("error", e.to_string().into())])),
                     };
                 }
             }
@@ -389,7 +389,7 @@ impl Shell {
                     }
                     // returns only on failure; success restarts the app
                     let Err(e) = update::install(downloaded.clone());
-                    self.update = UpdateState::Failed(tf("Update failed: {}", &[&e]));
+                    self.update = UpdateState::Failed(tf("update-failed", &[("error", e.to_string().into())]));
                 }
             }
             ShellMessage::DismissUpdate => self.update_dismissed = true,
@@ -417,7 +417,7 @@ impl Shell {
 
     fn save_settings(&mut self) {
         if let Err(e) = self.settings.save() {
-            self.error = Some(tf("Could not save settings: {}", &[&e]));
+            self.error = Some(tf("error-save-settings", &[("error", e.to_string().into())]));
         }
     }
 
@@ -490,13 +490,13 @@ impl Shell {
     fn update_offer(&self) -> Option<UpdateOffer> {
         match &self.update {
             UpdateState::Ready(release, _) => Some(UpdateOffer {
-                text: tf("Version {} is ready to install.", &[&release.version]),
-                action: t("Restart now"),
+                text: tf("update-ready", &[("version", release.version.to_string().into())]),
+                action: t("update-restart"),
                 message: ShellMessage::InstallUpdate,
             }),
             UpdateState::Done(Check::Available(release)) => Some(UpdateOffer {
-                text: tf("Version {} is available.", &[&release.version]),
-                action: t("Download"),
+                text: tf("update-available", &[("version", release.version.to_string().into())]),
+                action: t("update-download"),
                 message: ShellMessage::OpenUrl(release.url.clone()),
             }),
             _ => None,
@@ -512,7 +512,7 @@ impl Shell {
                     .padding([4, 12])
                     .style(ui::primary)
                     .on_press(offer.message),
-                button(text(t("Dismiss")).size(12))
+                button(text(t("update-dismiss")).size(12))
                     .padding([4, 12])
                     .style(ui::secondary)
                     .on_press(ShellMessage::DismissUpdate),
@@ -530,10 +530,10 @@ impl Shell {
         let mut form = Column::new()
             .spacing(10)
             .width(Length::Fill)
-            .push(section(t("WORKSPACE LOCATION")))
-            .push(self.path_row(t("Create workspace")))
+            .push(section(t("welcome-location")))
+            .push(self.path_row(t("welcome-create")))
             .push(hint(t(
-                "Pick an existing workspace folder to open it, or a new folder to start fresh.",
+                "welcome-location-help",
             )));
         if let Some(e) = &self.error {
             form = form.push(text(e.as_str()).size(13).color(ui::pal().danger));
@@ -545,9 +545,9 @@ impl Shell {
             .push(image(self.logo.clone()).width(96).height(96))
             .push(
                 column![
-                    text(t("Welcome to Wurzelwerk")).size(28).font(ui::BOLD),
+                    text(t("welcome-title")).size(28).font(ui::BOLD),
                     text(t(
-                        "Create a workspace to get started. A workspace is a folder that holds your families, clans, notes and files.",
+                        "welcome-body",
                     ))
                     .size(14)
                     .color(ui::pal().muted)
@@ -560,7 +560,7 @@ impl Shell {
 
         if !self.settings.recent.is_empty() {
             let mut recent = Column::new().spacing(4).width(Length::Fill);
-            recent = recent.push(section(t("RECENT WORKSPACES")));
+            recent = recent.push(section(t("welcome-recent")));
             for path in &self.settings.recent {
                 recent = recent.push(recent_row(path));
             }
@@ -579,12 +579,12 @@ impl Shell {
                         Appearance::Dark
                     })),
                 if ui::pal().dark {
-                    t("Light mode")
+                    t("tool-light-mode")
                 } else {
-                    t("Dark mode")
+                    t("tool-dark-mode")
                 },
             ),
-            button(icon_label("⚙", t("Settings")))
+            button(icon_label("⚙", t("tool-settings")))
                 .padding([6, 12])
                 .style(ui::secondary)
                 .on_press(ShellMessage::OpenSettings(SettingsPage::General)),
@@ -620,13 +620,13 @@ impl Shell {
     /// `[ path input ] [Browse…] [action]` shared by the welcome screen and the workspace page.
     fn path_row(&self, action: &'static str) -> Element<'_, ShellMessage> {
         row![
-            text_input(t("Folder path"), &self.path_input)
+            text_input(t("welcome-folder-path"), &self.path_input)
                 .on_input(ShellMessage::PathInput)
                 .on_submit(ShellMessage::SubmitPath)
                 .size(13)
                 .padding([8, 10])
                 .style(ui::input),
-            button(text(t("Browse…")).size(13))
+            button(text(t("settings-browse")).size(13))
                 .padding([8, 12])
                 .style(ui::secondary)
                 .on_press(ShellMessage::Browse),
@@ -645,7 +645,7 @@ impl Shell {
             .spacing(2)
             .width(Length::Fixed(200.0))
             .push(
-                container(text(t("Settings")).size(18).font(ui::BOLD))
+                container(text(t("tool-settings")).size(18).font(ui::BOLD))
                     .padding([6, 10])
                     .height(Length::Fixed(44.0)),
             );
@@ -685,7 +685,7 @@ impl Shell {
                     .padding([5, 9])
                     .style(ui::icon)
                     .on_press(ShellMessage::CloseSettings),
-                t("Close"),
+                t("settings-close"),
             ),
         ]
         .align_y(alignment::Vertical::Center)
@@ -744,13 +744,13 @@ impl Shell {
 
         column![
             setting(
-                t("APPEARANCE"),
-                t("Choose a light or dark look, or follow the system."),
+                t("settings-appearance"),
+                t("settings-appearance-help"),
                 container(appearance).padding(4).style(ui::segments),
             ),
             setting(
-                t("LANGUAGE"),
-                t("Language of the user interface."),
+                t("settings-language"),
+                t("settings-language-help"),
                 pick_list(Lang::ALL, Some(self.settings.language), ShellMessage::SetLanguage)
                     .text_size(13)
                     .padding([7, 12])
@@ -767,8 +767,8 @@ impl Shell {
 
         if let Some(app) = &self.app {
             page = page.push(setting(
-                t("CURRENT WORKSPACE"),
-                t("Everything you see on the board is stored in this folder."),
+                t("settings-current-workspace"),
+                t("settings-current-workspace-help"),
                 container(
                     row![
                         icon("▤").size(18).color(ui::pal().accent),
@@ -780,7 +780,7 @@ impl Shell {
                         ]
                         .spacing(2)
                         .width(Length::Fill),
-                        button(text(t("Open folder")).size(13))
+                        button(text(t("settings-open-folder")).size(13))
                             .padding([6, 12])
                             .style(ui::secondary)
                             .on_press(ShellMessage::OpenPath(app.cfg.project.clone())),
@@ -793,13 +793,13 @@ impl Shell {
             ));
         }
 
-        let mut switch = Column::new().spacing(8).push(self.path_row(t("Open")));
+        let mut switch = Column::new().spacing(8).push(self.path_row(t("settings-open")));
         if let Some(e) = &self.error {
             switch = switch.push(text(e.as_str()).size(13).color(ui::pal().danger));
         }
         page = page.push(setting(
-            t("SWITCH WORKSPACE"),
-            t("Pick a folder to open it as workspace. A new or empty folder becomes a new workspace."),
+            t("settings-switch-workspace"),
+            t("settings-switch-workspace-help"),
             switch,
         ));
 
@@ -811,11 +811,11 @@ impl Shell {
             recent = recent.push(recent_row(path));
         }
         if !any {
-            recent = recent.push(hint(t("No other workspaces yet.")));
+            recent = recent.push(hint(t("settings-no-recent")));
         }
         page.push(setting(
-            t("RECENT WORKSPACES"),
-            t("Open one of the workspaces you used before."),
+            t("welcome-recent"),
+            t("settings-recent-help"),
             recent,
         ))
         .into()
@@ -824,10 +824,10 @@ impl Shell {
     fn page_updates(&self) -> Element<'_, ShellMessage> {
         let status: Element<'_, ShellMessage> = match &self.update {
             UpdateState::Idle => text("").into(),
-            UpdateState::Checking => text(t("Checking…")).size(13).color(ui::pal().muted).into(),
+            UpdateState::Checking => text(t("settings-checking")).size(13).color(ui::pal().muted).into(),
             UpdateState::Done(Check::UpToDate) => row![
                 icon("✓").size(13).color(ui::pal().success),
-                text(t("You are up to date.")).size(13),
+                text(t("settings-up-to-date")).size(13),
             ]
             .spacing(6)
             .into(),
@@ -845,7 +845,7 @@ impl Shell {
                 .into()
             }
             UpdateState::Downloading(release) => {
-                text(tf("Downloading version {}…", &[&release.version]))
+                text(tf("update-downloading", &[("version", release.version.to_string().into())]))
                     .size(13)
                     .color(ui::pal().muted)
                     .into()
@@ -853,7 +853,7 @@ impl Shell {
             UpdateState::Failed(e) => text(e).size(13).color(ui::pal().danger).into(),
         };
 
-        let mut check = button(icon_label("⟳", t("Check now")))
+        let mut check = button(icon_label("⟳", t("settings-check-now")))
             .padding([7, 14])
             .style(ui::secondary);
         if !matches!(
@@ -865,17 +865,17 @@ impl Shell {
 
         column![
             setting(
-                t("VERSION"),
-                tf("Current version: {}", &[&update::VERSION]),
+                t("settings-version"),
+                tf("settings-current-version", &[("version", update::VERSION.into())]),
                 row![check, container(status).width(Length::Fill)]
                     .spacing(12)
                     .align_y(alignment::Vertical::Center),
             ),
             setting(
-                t("AUTOMATIC CHECK"),
-                t("Looks for a new release when Wurzelwerk starts and downloads it in the background."),
+                t("settings-automatic-check"),
+                t("settings-automatic-check-help"),
                 checkbox(self.settings.check_updates)
-                    .label(t("Check for updates on start"))
+                    .label(t("settings-check-on-start"))
                     .on_toggle(ShellMessage::SetCheckUpdates)
                     .text_size(13),
             ),
@@ -889,8 +889,8 @@ impl Shell {
             image(self.logo.clone()).width(80).height(80),
             column![
                 text("Wurzelwerk").size(26).font(ui::BOLD),
-                text(tf("Version {}", &[&update::VERSION])).size(14),
-                text(t("Clans & families board")).size(13).color(ui::pal().muted),
+                text(tf("about-version", &[("version", update::VERSION.into())])).size(14),
+                text(t("about-tagline")).size(13).color(ui::pal().muted),
             ]
             .spacing(4),
         ]
@@ -903,22 +903,22 @@ impl Shell {
         column![
             title,
             setting(
-                t("SETTINGS FILE"),
-                t("Global settings are stored here:"),
+                t("about-settings-file"),
+                t("about-settings-file-help"),
                 column![
                     text(settings_file.display().to_string()).size(13),
-                    button(text(t("Open folder")).size(13))
+                    button(text(t("settings-open-folder")).size(13))
                         .padding([6, 12])
                         .style(ui::secondary)
                         .on_press(ShellMessage::OpenPath(folder)),
                 ]
                 .spacing(8),
             ),
-            setting(t("LICENCE"), "MIT OR Apache-2.0", Row::new()),
+            setting(t("about-licence"), "MIT OR Apache-2.0", Row::new()),
             setting(
-                t("SOURCE CODE"),
+                t("about-source-code"),
                 update::REPO_URL,
-                button(icon_label("↗", t("Open on GitHub")))
+                button(icon_label("↗", t("about-open-github")))
                     .padding([6, 12])
                     .style(ui::secondary)
                     .on_press(ShellMessage::OpenUrl(update::REPO_URL.into())),
@@ -977,7 +977,13 @@ fn recent_row<'a>(path: &Path) -> Element<'a, ShellMessage> {
 /// Opens the database of a workspace folder and boots the board on it.
 fn open_app(cfg: Config) -> Result<(App, Task<Message>), String> {
     std::fs::create_dir_all(&cfg.project)
-        .map_err(|e| tf("cannot create {}: {}", &[&cfg.project.display(), &e]))?;
+        .map_err(|e| tf(
+            "error-create-folder",
+            &[
+                ("path", cfg.project.display().to_string().into()),
+                ("error", e.to_string().into()),
+            ],
+        ))?;
     store::migrate_legacy_db(&cfg.project);
 
     // a workspace that was closed a moment ago may still be flushing its file
@@ -992,8 +998,11 @@ fn open_app(cfg: Config) -> Result<(App, Task<Message>), String> {
             }
             Err(e) => {
                 return Err(tf(
-                    "cannot open the database in {}: {}",
-                    &[&cfg.project.display(), &e],
+                    "error-open-database",
+                    &[
+                        ("path", cfg.project.display().to_string().into()),
+                        ("error", e.to_string().into()),
+                    ],
                 ));
             }
         }

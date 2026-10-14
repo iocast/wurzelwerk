@@ -16,7 +16,7 @@ cargo run --release -- --demo 40x250         # empty workspace + 10 000 generate
   `~/Library/Application Support/wurzelwerk/settings.json` on macOS. *Settings → About* shows the exact path.
 * On first start (no saved workspace) the app asks for a location and creates the workspace there.
   Switch or create workspaces in *Settings → Workspace* (or the workspace button in the toolbar).
-* UI languages: English and German (`src/i18n.rs`; English text is the key).
+* UI languages: English and German via [Fluent](https://projectfluent.org) (`locales/<lang>/main.ftl`, loaded by `src/i18n.rs`); defaults to the system language.
 * Update check: the latest GitHub release of `iocast/wurzelwerk` (`vX.Y.Z` tag) is compared with the
   `Cargo.toml` version at start-up (can be disabled) or via *Settings → Updates → Check now*.
 

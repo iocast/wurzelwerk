@@ -32,9 +32,9 @@ impl Appearance {
 impl fmt::Display for Appearance {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::System => t("System"),
-            Self::Light => t("Light"),
-            Self::Dark => t("Dark"),
+            Self::System => t("settings-system"),
+            Self::Light => t("settings-light"),
+            Self::Dark => t("settings-dark"),
         })
     }
 }
@@ -54,7 +54,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            language: Lang::detect(),
+            language: Lang::System,
             appearance: Appearance::System,
             workspace: None,
             recent: Vec::new(),
