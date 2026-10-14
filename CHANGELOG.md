@@ -5,6 +5,17 @@ Format: Keep a Changelog (https://keepachangelog.com), versioning: Semantic Vers
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-14
+
+### Added
+- Timeline (`T` or *Timeline* in the toolbar): a year range slider under the board shows who was alive between two years; people appear in their birth year, disappear when they died before the range and fade when they died within it, and clan hulls follow their visible members
+- Timeline controls: drag either end of the range or the range itself; *Play* (`Space`) moves the end forward year by year. Lines whose name contains a year (e.g. `married 1789`) appear from that year
+- *Open example workspace* (welcome screen and *Settings → Workspace*) creates a generated board in `Documents/Wurzelwerk Example`: 11 clans, about 600 people from the 1620s to today, with clan and founder notes and a *Chronicle* book
+
+### Changed
+- `--demo RxC` generates families across four centuries (dated weddings, remarriages, twins, godparents, notes) instead of people born between 1880 and 2040
+- Language setting: new *System* option, the default for new installations, follows the language of the operating system
+
 ## [0.1.3] - 2026-10-11
 
 ### Changed
@@ -37,7 +48,8 @@ Format: Keep a Changelog (https://keepachangelog.com), versioning: Semantic Vers
 - Update check against the latest GitHub release at start-up or via *Settings → Updates → Check now*; can be turned off
 - Large boards with 10 000 people stay smooth; `--demo RxC` generates such a board for load testing
 
-[unreleased]: https://github.com/iocast/wurzelwerk/compare/v0.1.3...HEAD
+[unreleased]: https://github.com/iocast/wurzelwerk/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/iocast/wurzelwerk/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/iocast/wurzelwerk/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/iocast/wurzelwerk/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/iocast/wurzelwerk/compare/v0.1.0...v0.1.1
