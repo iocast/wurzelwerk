@@ -200,6 +200,9 @@ welcome-folder-path = Ordnerpfad
 welcome-create = Arbeitsbereich erstellen
 welcome-choose-folder = Ordner des Arbeitsbereichs wählen
 welcome-enter-location = Bitte einen Ort angeben.
+example-title = BEISPIEL-ARBEITSBEREICH
+example-help = Ein generiertes Familienbrett (11 Sippen, rund 600 Personen über vier Jahrhunderte), um das Brett und die Zeitleiste zu erkunden. Es wird beim ersten Öffnen erstellt.
+example-open = Beispiel-Arbeitsbereich öffnen
 error-create-folder = { $path } kann nicht erstellt werden: { $error }
 error-open-database = Datenbank in { $path } kann nicht geöffnet werden: { $error }
 

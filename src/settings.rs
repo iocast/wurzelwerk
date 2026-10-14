@@ -122,7 +122,16 @@ pub fn settings_path() -> PathBuf {
 
 /// Suggested location for the first workspace.
 pub fn default_workspace() -> PathBuf {
+    documents().join("Wurzelwerk")
+}
+
+/// Where the generated example workspace is created.
+pub fn example_workspace() -> PathBuf {
+    documents().join("Wurzelwerk Example")
+}
+
+fn documents() -> PathBuf {
     let base = home().unwrap_or_else(|| PathBuf::from("."));
     let docs = base.join("Documents");
-    if docs.is_dir() { docs } else { base }.join("Wurzelwerk")
+    if docs.is_dir() { docs } else { base }
 }

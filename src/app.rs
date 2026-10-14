@@ -301,6 +301,9 @@ impl App {
             cmds.extend(data.people.iter().map(|p| Cmd::put(PEOPLE, &p.id, p, true)));
             cmds.extend(data.links.iter().map(|l| Cmd::put(LINKS, &l.id, l, true)));
             db.send(Cmd::Batch(cmds));
+            for (key, markdown) in crate::demo::notes(&data) {
+                let _ = notes::save(&key.path(&cfg.project), &markdown);
+            }
         }
 
         let mut app = Self {

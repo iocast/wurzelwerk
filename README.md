@@ -7,8 +7,12 @@ Rust 1.99 · iced 0.14 (wgpu) · embedded RedDB (`reddb-io` 1.23, document model
 ```
 cargo run --release                          # last used workspace (asks for one on first start)
 cargo run --release -- D:\families\weber     # open this workspace for one run
-cargo run --release -- --demo 40x250         # empty workspace + 10 000 generated people (load test)
+cargo run --release -- --demo 40x250         # empty workspace + up to 10 000 generated people (load test)
 ```
+
+*Open example workspace* (welcome screen, *Settings → Workspace*) creates `Documents/Wurzelwerk Example` on first use:
+11 generated clans (about 600 people, 1620 – today) with dated weddings, remarriages, twins, godparents,
+clan and founder notes and a *Chronicle* book with one page per century. `--demo` generates the same kind of data.
 
 ## Settings, workspaces, updates
 * Global settings (language, current + recent workspaces, update check) are stored in

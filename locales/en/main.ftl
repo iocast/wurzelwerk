@@ -197,6 +197,9 @@ welcome-folder-path = Folder path
 welcome-create = Create workspace
 welcome-choose-folder = Choose workspace folder
 welcome-enter-location = Please enter a location.
+example-title = EXAMPLE WORKSPACE
+example-help = A generated family board (11 clans, about 600 people over four centuries) to explore the board and the timeline. It is created on first use.
+example-open = Open example workspace
 error-create-folder = cannot create { $path }: { $error }
 error-open-database = cannot open the database in { $path }: { $error }
 

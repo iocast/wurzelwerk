@@ -13,6 +13,7 @@ use iced::widget::{
 use iced::{Element, Event, Length, Padding, Size, Subscription, Task, Theme, alignment, event, keyboard, theme, window};
 
 use crate::app::{App, Config, Init, Message, hint, hline, icon, icon_label, section, tip, vline};
+use crate::demo;
 use crate::files;
 use crate::i18n::{self, Lang, t, tf};
 use crate::settings::{self, Appearance, Settings};
@@ -130,6 +131,8 @@ pub enum ShellMessage {
     Browsed(Option<PathBuf>),
     SubmitPath,
     OpenWorkspace(PathBuf),
+    /// Opens the example workspace, generating it on first use.
+    OpenExample,
     // settings dialog
     OpenSettings(SettingsPage),
     CloseSettings,
@@ -329,6 +332,13 @@ impl Shell {
                 }
             }
             ShellMessage::OpenWorkspace(path) => return self.open_workspace(path, true, None),
+            ShellMessage::OpenExample => {
+                return self.open_workspace(
+                    settings::example_workspace(),
+                    true,
+                    Some(demo::EXAMPLE),
+                );
+            }
 
             ShellMessage::OpenSettings(page) => self.dialog = Some(page),
             ShellMessage::CloseSettings => self.dialog = None,
@@ -556,7 +566,8 @@ impl Shell {
                 .spacing(8)
                 .align_x(alignment::Horizontal::Center),
             )
-            .push(container(form).padding(18).style(ui::section_card));
+            .push(container(form).padding(18).style(ui::section_card))
+            .push(example_row());
 
         if !self.settings.recent.is_empty() {
             let mut recent = Column::new().spacing(4).width(Length::Fill);
@@ -818,6 +829,11 @@ impl Shell {
             t("settings-recent-help"),
             recent,
         ))
+        .push(setting(
+            t("example-title"),
+            t("example-help"),
+            example_row(),
+        ))
         .into()
     }
 
@@ -944,6 +960,22 @@ fn setting<'a>(
         control.into()
     ]
     .spacing(10)
+    .into()
+}
+
+/// `[✦ Open example workspace]  <where it lives>`
+fn example_row<'a>() -> Element<'a, ShellMessage> {
+    row![
+        button(icon_label("✦", t("example-open")))
+            .padding([7, 14])
+            .style(ui::secondary)
+            .on_press(ShellMessage::OpenExample),
+        text(settings::example_workspace().display().to_string())
+            .size(12)
+            .color(ui::pal().muted),
+    ]
+    .spacing(10)
+    .align_y(alignment::Vertical::Center)
     .into()
 }
 
