@@ -175,6 +175,10 @@ mod tests {
                         continue;
                     };
                     let id = &rest[..rest.find('"').unwrap()];
+                    // not a call, e.g. the `["t(", "tf("]` above
+                    if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                        continue;
+                    }
                     assert!(en.contains(id), "{}: unknown message {id}", path.display());
                 }
             }
