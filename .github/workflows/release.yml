@@ -108,7 +108,7 @@ jobs:
           if [ "${{ needs.validate.outputs.prerelease }}" = "true" ]; then
             FORMATS="${FORMATS//,wix/}"
           fi
-          cargo packager --release -p WURZELWERK-app --formats "$FORMATS"
+          cargo packager --release --formats "$FORMATS"
         env:
           # The AppImage tooling is itself an AppImage; runners have no FUSE.
           APPIMAGE_EXTRACT_AND_RUN: 1
