@@ -78,17 +78,20 @@ jobs:
           sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libgtk-3-dev
 
       # .cargo/config.toml defaults PROTOC to the bundled Windows protoc.exe,
-      # which cannot run here; point it at a native one instead.
+      # which cannot run on Linux/macOS; CI uses a native one everywhere.
       - name: Install protoc
-        if: runner.os != 'Windows'
         shell: bash
         run: |
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            sudo apt-get install -y protobuf-compiler
-          else
-            brew install protobuf
+          case "$RUNNER_OS" in
+            Linux)   sudo apt-get install -y protobuf-compiler ;;
+            macOS)   brew install protobuf ;;
+            Windows) choco install protoc -y --no-progress ;;
+          esac
+          PROTOC_PATH="$(command -v protoc)"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            PROTOC_PATH="$(cygpath -w "$PROTOC_PATH")"
           fi
-          echo "PROTOC=$(command -v protoc)" >> "$GITHUB_ENV"
+          echo "PROTOC=$PROTOC_PATH" >> "$GITHUB_ENV"
           protoc --version
 
       - name: Install cargo-packager
