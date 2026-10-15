@@ -5,6 +5,11 @@ Format: Keep a Changelog (https://keepachangelog.com), versioning: Semantic Vers
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-15
+
+### Fixed
+- Release builds produce the installers again: Windows (`.exe`, `.msi`), macOS (`.dmg`) and Linux (`.deb`, `.AppImage`); version 0.2.0 was published without them
+
 ## [0.2.0] - 2026-10-14
 
 ### Added
@@ -48,7 +53,8 @@ Format: Keep a Changelog (https://keepachangelog.com), versioning: Semantic Vers
 - Update check against the latest GitHub release at start-up or via *Settings → Updates → Check now*; can be turned off
 - Large boards with 10 000 people stay smooth; `--demo RxC` generates such a board for load testing
 
-[unreleased]: https://github.com/iocast/wurzelwerk/compare/v0.2.0...HEAD
+[unreleased]: https://github.com/iocast/wurzelwerk/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/iocast/wurzelwerk/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/iocast/wurzelwerk/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/iocast/wurzelwerk/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/iocast/wurzelwerk/compare/v0.1.1...v0.1.2
