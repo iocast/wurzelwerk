@@ -943,6 +943,24 @@ type SegmentHitCandidate<'a> = (
     f32,
 );
 
+/// Screen px that line hit areas and drawn labels reach beyond the indexed line areas.
+const LINE_SLACK: f32 = 24.0;
+
+/// Lines whose route or label may touch `area` (world), in drawing order.
+fn lines_in(app: &App, area: Rectangle) -> impl DoubleEndedIterator<Item = &Link> {
+    let links = &app.data.links;
+    app.routes
+        .lines_in(area)
+        .into_iter()
+        .filter_map(|index| links.get(index as usize))
+}
+
+/// Lines that may be hit at the screen position `pos`.
+fn lines_at<'a>(app: &'a App, cam: &Camera, pos: Point) -> impl DoubleEndedIterator<Item = &'a Link> {
+    let area = Rectangle::new(cam.to_world(pos), Size::ZERO).expand(LINE_SLACK / cam.zoom);
+    lines_in(app, area)
+}
+
 fn link_label_hit<'a>(
     app: &'a App,
     cam: &Camera,
@@ -953,7 +971,7 @@ fn link_label_hit<'a>(
     }
     let text_size = LABEL_TEXT * cam.zoom.min(1.4);
     // runs on every hover: rule out other label rows before the costly label text
-    app.data.links.iter().rev().find_map(|link| {
+    lines_at(app, cam, pos).rev().find_map(|link| {
         if link.label.is_empty() {
             return None;
         }
@@ -1002,7 +1020,7 @@ fn link_segment_hit<'a>(
     let world = cam.to_world(pos);
     let slack = REACH / cam.zoom;
     let mut nearest: Option<SegmentHitCandidate<'_>> = None;
-    for link in &app.data.links {
+    for link in lines_at(app, cam, pos) {
         let Some(route) = app.routes.get(&link.id) else {
             continue;
         };
@@ -1759,7 +1777,7 @@ fn draw_edges(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
     let show_labels = z >= LOD_EDGE_LABELS;
     let label_size = LABEL_TEXT * z.min(1.4);
 
-    for link in &app.data.links {
+    for link in lines_in(app, view.expand(LINE_SLACK / z)) {
         let Some(r) = app.routes.get(&link.id) else {
             continue;
         };

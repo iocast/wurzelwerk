@@ -14,6 +14,8 @@
 //!   segments of different lines are spread apart; lines stay orthogonal and clear of cards.
 //! * **Labels** - automatic line labels take the first candidate position that overlaps
 //!   neither a card nor another label (greedy placement).
+//! * **Line index** - lines (route plus automatic label) in a bucket grid, so hover hit
+//!   tests and drawing only visit the lines near the cursor or in view.
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
@@ -50,6 +52,7 @@ const NUDGE_CENTRE_CHANNEL: f32 = 240.0;
 pub const LABEL_TEXT: f32 = 11.0;
 const LABEL_HALF_HEIGHT: f32 = 8.0;
 const LABEL_BUCKET: f32 = 128.0;
+const LINE_BUCKET: f32 = 512.0;
 
 // ---------------------------------------------------------------------------
 // geometry helpers
@@ -1519,10 +1522,28 @@ struct Entry {
     cards: [Rectangle; 2],
     route: Route,
     seen: u64,
+    // line index
+    /// Position in `data.links`.
+    index: u32,
+    free_label: bool,
+    /// World width of the label at [`LABEL_TEXT`] (set by [`Routes::finish`]).
+    label_width: f32,
+}
+
+/// A user-placed label may lie anywhere, away from its line.
+fn free_label(link: &Link) -> bool {
+    !link.label.is_empty() && link.label_position.is_some()
 }
 
 impl Entry {
-    fn new(a: &Person, b: &Person, link: &Link, obstacles: &Obstacles, seen: u64) -> Self {
+    fn new(
+        a: &Person,
+        b: &Person,
+        link: &Link,
+        obstacles: &Obstacles,
+        seen: u64,
+        index: u32,
+    ) -> Self {
         let mut window = Window::default();
         let raw = route_points(a, b, link, obstacles, &mut window);
         let cards = [card(a), card(b)];
@@ -1541,6 +1562,9 @@ impl Entry {
             window,
             cards,
             seen,
+            index,
+            free_label: free_label(link),
+            label_width: 0.0,
         }
     }
 
@@ -1562,11 +1586,44 @@ pub struct Routes {
     people: Vec<(Id, Point)>,
     entries: HashMap<Id, Entry>,
     stamp: u64,
+    /// Bucket → lines whose route or automatic label touches it (`data.links` indices).
+    lines: HashMap<Bucket, Vec<u32>>,
+    /// Lines with a user-placed label, candidates everywhere.
+    free_lines: Vec<u32>,
 }
 
 impl Routes {
     pub fn get(&self, link_id: &str) -> Option<&Route> {
         self.entries.get(link_id).map(|entry| &entry.route)
+    }
+
+    /// Indices into `data.links` (as of the last sync), ascending, of the lines whose
+    /// route or label may touch `area`. Labels are covered at [`LABEL_TEXT`] size, so
+    /// callers pad `area` by what they draw or hit around them.
+    pub fn lines_in(&self, area: Rectangle) -> Vec<u32> {
+        let ((x0, y0), (x1, y1)) = bucket_span(&area, LINE_BUCKET);
+        let mut found = self.free_lines.clone();
+        let span = (x1 - x0 + 1) as i64 * (y1 - y0 + 1) as i64;
+        if span > self.lines.len() as i64 {
+            // zoomed far out: walk the occupied buckets instead of the empty range
+            for (&(bx, by), bucket) in &self.lines {
+                if bx >= x0 && bx <= x1 && by >= y0 && by <= y1 {
+                    found.extend_from_slice(bucket);
+                }
+            }
+        } else {
+            for by in y0..=y1 {
+                for bx in x0..=x1 {
+                    if let Some(bucket) = self.lines.get(&(bx, by)) {
+                        found.extend_from_slice(bucket);
+                    }
+                }
+            }
+        }
+        // lines spanning several buckets are found more than once
+        found.sort_unstable();
+        found.dedup();
+        found
     }
 
     pub fn obstacles(&self) -> &Obstacles {
@@ -1580,7 +1637,9 @@ impl Routes {
         self.stamp += 1;
         let stamp = self.stamp;
         let mut changed = false;
-        for link in &data.links {
+        // reordered lines or labels placed / reset by the user: only the index is stale
+        let mut reindex = false;
+        for (index, link) in (0u32..).zip(&data.links) {
             let (Some(a), Some(b)) = (data.person(&link.from), data.person(&link.to)) else {
                 continue;
             };
@@ -1591,17 +1650,24 @@ impl Routes {
                     })
             });
             if stale {
-                let entry = Entry::new(a, b, link, &self.obstacles, stamp);
+                let entry = Entry::new(a, b, link, &self.obstacles, stamp, index);
                 self.entries.insert(link.id.clone(), entry);
                 changed = true;
             } else if let Some(entry) = self.entries.get_mut(&link.id) {
                 entry.seen = stamp;
+                if entry.index != index || entry.free_label != free_label(link) {
+                    entry.index = index;
+                    entry.free_label = free_label(link);
+                    reindex = true;
+                }
             }
         }
         let before = self.entries.len();
         self.entries.retain(|_, entry| entry.seen == stamp);
         if changed || self.entries.len() != before {
             self.finish(data);
+        } else if reindex {
+            self.index_lines();
         }
     }
 
@@ -1698,9 +1764,12 @@ impl Routes {
             if link.label.is_empty() || link.label_position.is_none() {
                 continue;
             }
-            let route = &self.entries[&link.id].route;
-            let (at, centered) = label_layout(link, route);
-            placed.insert(label_rect(at, centered, label_width(&data.link_label(&link.label), LABEL_TEXT)));
+            let Some(entry) = self.entries.get_mut(&link.id) else {
+                continue;
+            };
+            let (at, centered) = label_layout(link, &entry.route);
+            entry.label_width = label_width(&data.link_label(&link.label), LABEL_TEXT);
+            placed.insert(label_rect(at, centered, entry.label_width));
         }
         for link in &links {
             if link.label.is_empty() || link.label_position.is_some() {
@@ -1710,6 +1779,7 @@ impl Routes {
                 continue;
             };
             let width = label_width(&data.link_label(&link.label), LABEL_TEXT);
+            entry.label_width = width;
             let chosen = label_candidates(&entry.route.points, width)
                 .into_iter()
                 .find(|&(at, centered)| {
@@ -1726,6 +1796,31 @@ impl Routes {
             }
             let route = &entry.route;
             placed.insert(label_rect(route.label_at, route.label_centered, width));
+        }
+        self.index_lines();
+    }
+
+    /// Rebuilds the line index from the entries.
+    fn index_lines(&mut self) {
+        self.lines.clear();
+        self.free_lines.clear();
+        for entry in self.entries.values() {
+            if entry.free_label {
+                self.free_lines.push(entry.index);
+                continue;
+            }
+            let route = &entry.route;
+            let mut area = route.bbox;
+            if entry.label_width > 0.0 {
+                let label = label_rect(route.label_at, route.label_centered, entry.label_width);
+                area = union(area, label);
+            }
+            let ((x0, y0), (x1, y1)) = bucket_span(&area, LINE_BUCKET);
+            for by in y0..=y1 {
+                for bx in x0..=x1 {
+                    self.lines.entry((bx, by)).or_default().push(entry.index);
+                }
+            }
         }
     }
 }
@@ -2202,6 +2297,35 @@ mod tests {
             label_rect(route.label_at, route.label_centered, width)
         };
         assert!(!overlaps(&rect("one"), &rect("two")));
+    }
+
+    #[test]
+    fn line_index_follows_reordering_and_placed_labels() {
+        let people = vec![
+            person("a", 0.0, 0.0),
+            person("b", 400.0, 0.0),
+            person("c", 5000.0, 5000.0),
+            person("d", 5400.0, 5000.0),
+        ];
+        let near_a = Rectangle::new(Point::new(180.0, 20.0), iced::Size::new(40.0, 40.0));
+        let mut data = sample_data(people.clone(), vec![link("ab", "a", "b"), link("cd", "c", "d")]);
+        let mut routes = Routes::default();
+        routes.sync(&data);
+        assert_eq!(routes.lines_in(near_a), vec![0]);
+
+        data = sample_data(people, vec![link("cd", "c", "d"), link("ab", "a", "b")]);
+        routes.sync(&data);
+        assert_eq!(routes.lines_in(near_a), vec![1]);
+
+        // a user-placed label can be dragged anywhere, so its line is always a candidate
+        data.links[0].label_position = Some(crate::model::LinkLabelPosition {
+            segment: 0,
+            along: 0.5,
+            offset: [-5200.0, -4980.0],
+            legacy_absolute: false,
+        });
+        routes.sync(&data);
+        assert_eq!(routes.lines_in(near_a), vec![0, 1]);
     }
 }
 
