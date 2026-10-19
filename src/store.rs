@@ -22,7 +22,7 @@ use reddb_types::Value as ReddbValue;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::model::{Clan, Data, FileRec, Link, Person};
+use crate::model::{Clan, Data, FileRec, Link, Person, Relation};
 
 pub const DB_FILE: &str = "wurzelwerk.rdb";
 
@@ -47,6 +47,7 @@ pub const PEOPLE: &str = "sb_people";
 pub const CLANS: &str = "sb_clans";
 pub const LINKS: &str = "sb_links";
 pub const FILES: &str = "sb_files";
+pub const RELATIONS: &str = "sb_relations";
 
 /// A write operation for the worker.
 #[derive(Debug)]
@@ -183,7 +184,7 @@ impl Store {
     fn open(path: &Path) -> Result<Self, String> {
         let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path))
             .map_err(|e| format!("cannot open {}: {e:?}", path.display()))?;
-        for coll in [PEOPLE, CLANS, LINKS, FILES] {
+        for coll in [PEOPLE, CLANS, LINKS, FILES, RELATIONS] {
             let sql = format!("CREATE DOCUMENT IF NOT EXISTS {coll}");
             rt.execute_query(&sql)
                 .map_err(|e| format!("{sql}: {e:?}"))?;
@@ -196,7 +197,9 @@ impl Store {
         let clans: Vec<Clan> = self.load(CLANS)?;
         let links: Vec<Link> = self.load(LINKS)?;
         let files: Vec<FileRec> = self.load(FILES)?;
-        Ok(Data::from_parts(people, clans, links, files))
+        let mut data = Data::from_parts(people, clans, links, files);
+        data.relations = self.load::<Relation>(RELATIONS)?;
+        Ok(data)
     }
 
     /// Read the entity payload from each native document's `body.data` path.

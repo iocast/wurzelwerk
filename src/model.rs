@@ -1,9 +1,12 @@
 //! Domain model: people, clans (families), lines (links) and attached files.
 
-use std::collections::HashMap;
+use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap};
 
 use iced::{Color, Rectangle};
 use serde::{Deserialize, Serialize};
+
+use crate::i18n::{self, t};
 
 pub type Id = String;
 
@@ -29,16 +32,16 @@ pub const PALETTE: [[f32; 3]; 10] = [
     [0.616, 0.494, 0.137],
 ];
 
-/// Suggested line names shown when a new line is drawn.
+/// Message ids of the suggested line names shown when a new line is drawn.
 pub const LINK_PRESETS: [&str; 8] = [
-    "married",
-    "parents of",
-    "father of",
-    "mother of",
-    "siblings",
-    "partner",
-    "godfather of",
-    "godmother of",
+    "link-married",
+    "link-parents-of",
+    "link-father-of",
+    "link-mother-of",
+    "link-siblings",
+    "link-partner",
+    "link-godfather-of",
+    "link-godmother-of",
 ];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -188,6 +191,47 @@ impl<'de> Deserialize<'de> for LinkLabelPosition {
     }
 }
 
+/// A line name the user typed ("affair of"), offered again as a suggestion and
+/// translated per language in the workspace settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Relation {
+    pub id: Id,
+    /// Name per locale ("en", "de"); an empty or missing one falls back to another language.
+    #[serde(default)]
+    pub names: BTreeMap<String, String>,
+}
+
+impl Relation {
+    /// A relation named in the active language.
+    pub fn new(name: &str) -> Self {
+        Self {
+            id: new_id(),
+            names: BTreeMap::from([(i18n::locale().to_owned(), name.trim().to_owned())]),
+        }
+    }
+
+    /// The name in the active language, else in any other.
+    pub fn name(&self) -> &str {
+        let filled = |n: &&String| !n.trim().is_empty();
+        self.names
+            .get(i18n::locale())
+            .filter(filled)
+            .or_else(|| self.names.values().find(filled))
+            .map_or("", |n| n.trim())
+    }
+}
+
+/// What follows `name` in a trimmed `label` ("married 1789" -> " 1789"), if the label
+/// starts with it as a whole word (ASCII case ignored).
+fn strip_name<'a>(label: &'a str, name: &str) -> Option<&'a str> {
+    let name = name.trim();
+    let rest = label.get(name.len()..)?;
+    (!name.is_empty()
+        && label[..name.len()].eq_ignore_ascii_case(name)
+        && (rest.is_empty() || rest.starts_with(' ')))
+    .then_some(rest)
+}
+
 /// File attached to a person. The file itself lives in `<project>/person/<person-id>/files/`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileRec {
@@ -211,8 +255,20 @@ pub enum LinkStyle {
 
 pub fn link_style(label: &str) -> LinkStyle {
     let l = label.trim().to_lowercase();
+    // labels are free text in the UI language, and files may move between languages
     if [
-        "married", "siblings", "sibling", "partner", "divorced", "spouse",
+        "married",
+        "siblings",
+        "sibling",
+        "partner",
+        "divorced",
+        "spouse",
+        "verheiratet",
+        "geschwister",
+        "geschieden",
+        "ehepartner",
+        "ehefrau",
+        "ehemann",
     ]
     .iter()
     .any(|k| l.starts_with(k))
@@ -227,7 +283,7 @@ pub fn link_style(label: &str) -> LinkStyle {
 
 pub fn is_parent_label(label: &str) -> bool {
     let l = label.trim().to_lowercase();
-    ["parent", "father", "mother"]
+    ["parent", "father", "mother", "eltern", "vater", "mutter"]
         .iter()
         .any(|k| l.starts_with(k))
 }
@@ -277,6 +333,7 @@ pub struct Data {
     pub clan_idx: HashMap<Id, usize>,
     pub links: Vec<Link>,
     pub files: Vec<FileRec>,
+    pub relations: Vec<Relation>,
 }
 
 impl Data {
@@ -319,6 +376,67 @@ impl Data {
             .enumerate()
             .map(|(i, c)| (c.id.clone(), i))
             .collect();
+    }
+
+    /// The suggested or user-added line name `label` starts with, in the active language,
+    /// and the rest of the label ("Married 1789" -> ("verheiratet", " 1789") in German).
+    pub fn known_name<'s, 'a>(&'s self, label: &'a str) -> Option<(&'s str, &'a str)> {
+        let label = label.trim();
+        let presets = i18n::preset_names()
+            .iter()
+            .flat_map(|(id, names)| names.iter().map(|n| (n.as_str(), t(id))));
+        let custom = self
+            .relations
+            .iter()
+            .flat_map(|r| r.names.values().map(|n| (n.as_str(), r.name())));
+        presets
+            .chain(custom)
+            .filter_map(|(name, shown)| Some((name.trim().len(), shown, strip_name(label, name)?)))
+            .max_by_key(|&(len, ..)| len)
+            .map(|(_, shown, rest)| (shown, rest))
+    }
+
+    /// A line name as shown in the active language; unknown names stay as typed.
+    pub fn link_label<'a>(&self, label: &'a str) -> Cow<'a, str> {
+        match self.known_name(label) {
+            Some((name, rest)) if label.trim() != format!("{name}{rest}") => {
+                Cow::Owned(format!("{name}{rest}"))
+            }
+            _ => Cow::Borrowed(label),
+        }
+    }
+
+    /// Keeps a typed line name as a [`Relation`] unless it is already known.
+    pub fn remember_relation(&mut self, label: &str) -> Option<&Relation> {
+        if label.trim().is_empty() || self.known_name(label).is_some() {
+            return None;
+        }
+        self.relations.push(Relation::new(label));
+        self.relations.last()
+    }
+
+    /// Renames a relation in one language and the lines that used the old name;
+    /// returns the changed lines.
+    pub fn rename_relation(&mut self, id: &str, locale: &str, name: String) -> Vec<Id> {
+        let Some(r) = self.relations.iter_mut().find(|r| r.id == id) else {
+            return Vec::new();
+        };
+        let old = r.names.insert(locale.to_owned(), name).unwrap_or_default();
+        let new = match r.names[locale].trim() {
+            "" => r.name().to_owned(),
+            name => name.to_owned(),
+        };
+        if old.trim().is_empty() || new.is_empty() {
+            return Vec::new();
+        }
+        let mut changed = Vec::new();
+        for link in &mut self.links {
+            if let Some(rest) = strip_name(link.label.trim(), &old) {
+                link.label = format!("{new}{rest}");
+                changed.push(link.id.clone());
+            }
+        }
+        changed
     }
 
     pub fn person(&self, id: &str) -> Option<&Person> {
@@ -372,4 +490,51 @@ fn dedup<T>(items: Vec<T>, id: impl Fn(&T) -> &Id) -> Vec<T> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::i18n::Lang;
+
+    fn link(label: &str) -> Link {
+        Link {
+            id: new_id(),
+            from: "a".into(),
+            to: "b".into(),
+            label: label.into(),
+            route: Vec::new(),
+            start_port: None,
+            end_port: None,
+            label_position: None,
+        }
+    }
+
+    // the only test that switches the language
+    #[test]
+    fn relations_are_remembered_shown_translated_and_renamed() {
+        let mut data = Data::default();
+        i18n::set(Lang::De);
+        assert_eq!(data.link_label("mother of"), "Mutter von");
+        assert_eq!(data.link_label("Married 1789"), "verheiratet 1789");
+        assert_eq!(data.link_label("Vater von"), "Vater von");
+        assert_eq!(data.link_label("motherly"), "motherly");
+        assert!(data.remember_relation("Mutter von").is_none());
+
+        let id = data.remember_relation("Affäre").unwrap().id.clone();
+        assert!(data.remember_relation("Affäre 1850").is_none());
+        data.links = vec![link("Affäre 1850"), link("Affären")];
+        let changed = data.rename_relation(&id, "en", "affair".into());
+        assert!(changed.is_empty());
+
+        i18n::set(Lang::En);
+        assert_eq!(data.link_label("Taufpatin von"), "godmother of");
+        assert_eq!(data.link_label("Affäre 1850"), "affair 1850");
+        assert_eq!(data.link_label("Affären"), "Affären");
+
+        let changed = data.rename_relation(&id, "de", "Liebschaft".into());
+        assert_eq!(changed, vec![data.links[0].id.clone()]);
+        assert_eq!(data.links[0].label, "Liebschaft 1850");
+        assert_eq!(data.link_label("Liebschaft 1850"), "affair 1850");
+    }
 }

@@ -30,6 +30,8 @@ pub enum Lang {
 
 impl Lang {
     pub const ALL: [Lang; 3] = [Lang::System, Lang::En, Lang::De];
+    /// The concrete languages, without `System`.
+    pub const LANGUAGES: [Lang; 2] = [Lang::En, Lang::De];
 
     /// The concrete language, resolving `System` (English when unknown).
     pub fn resolve(self) -> Self {
@@ -40,6 +42,11 @@ impl Lang {
             },
             lang => lang,
         }
+    }
+
+    /// Locale code ("en", "de") of the concrete language.
+    pub fn code(self) -> &'static str {
+        SOURCES[self.index()].0
     }
 
     fn index(self) -> usize {
@@ -72,6 +79,11 @@ pub fn set(lang: Lang) {
     CURRENT.store(lang.index() as u8, Ordering::Relaxed);
 }
 
+/// Locale code ("en", "de") of the active language.
+pub fn locale() -> &'static str {
+    SOURCES[current()].0
+}
+
 fn current() -> usize {
     CURRENT.load(Ordering::Relaxed) as usize
 }
@@ -94,6 +106,17 @@ pub fn tf(id: &str, args: &[(&str, FluentValue<'_>)]) -> String {
         fluent.set(*name, value.clone());
     }
     format(current(), id, Some(&fluent))
+}
+
+/// Each suggested line name ([`crate::model::LINK_PRESETS`]) in every language, by message id.
+pub fn preset_names() -> &'static [(&'static str, [String; 2])] {
+    static NAMES: OnceLock<Vec<(&'static str, [String; 2])>> = OnceLock::new();
+    NAMES.get_or_init(|| {
+        crate::model::LINK_PRESETS
+            .iter()
+            .map(|&id| (id, [0, 1].map(|lang| format(lang, id, None))))
+            .collect()
+    })
 }
 
 fn bundles() -> &'static [FluentBundle<FluentResource>; 2] {
@@ -182,6 +205,17 @@ mod tests {
                     assert!(en.contains(id), "{}: unknown message {id}", path.display());
                 }
             }
+        }
+    }
+
+    #[test]
+    fn link_presets_exist_and_keep_their_style() {
+        use crate::model::{LINK_PRESETS, link_style};
+        let en = ids(SOURCES[0].1);
+        for id in LINK_PRESETS {
+            assert!(en.contains(id), "unknown message {id}");
+            let (en, de) = (format(0, id, None), format(1, id, None));
+            assert_eq!(link_style(&de), link_style(&en), "{id}");
         }
     }
 

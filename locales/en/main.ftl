@@ -98,6 +98,17 @@ line-route = ROUTE
 line-delete-help = Press Delete to remove this line.
 line-remove = Remove line
 
+## line presets
+
+link-married = married
+link-parents-of = parents of
+link-father-of = father of
+link-mother-of = mother of
+link-siblings = siblings
+link-partner = partner
+link-godfather-of = godfather of
+link-godmother-of = godmother of
+
 ## inspector - person
 
 person-details = DETAILS
@@ -220,6 +231,10 @@ settings-language-help = Language of the user interface.
 settings-current-workspace = CURRENT WORKSPACE
 settings-current-workspace-help = Everything you see on the board is stored in this folder.
 settings-open-folder = Open folder
+settings-relations = RELATIONSHIPS
+settings-relations-help = Line names you typed yourself. They are offered again when you draw a line; give each a name per language. Renaming also renames the lines that use it.
+settings-no-relations = No own relationships yet. Type a new name when you create a line.
+settings-remove-relation = Remove from the suggestions (lines keep their name)
 settings-switch-workspace = SWITCH WORKSPACE
 settings-switch-workspace-help = Pick a folder to open it as workspace. A new or empty folder becomes a new workspace.
 settings-browse = Browse…

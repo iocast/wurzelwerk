@@ -101,6 +101,17 @@ line-route = VERLAUF
 line-delete-help = Entf drücken, um diese Linie zu löschen.
 line-remove = Linie entfernen
 
+## line presets
+
+link-married = verheiratet
+link-parents-of = Eltern von
+link-father-of = Vater von
+link-mother-of = Mutter von
+link-siblings = Geschwister
+link-partner = Partner
+link-godfather-of = Taufpate von
+link-godmother-of = Taufpatin von
+
 ## inspector - person
 
 person-details = DETAILS
@@ -223,6 +234,10 @@ settings-language-help = Sprache der Benutzeroberfläche.
 settings-current-workspace = AKTUELLER ARBEITSBEREICH
 settings-current-workspace-help = Alles, was du auf dem Brett siehst, ist in diesem Ordner gespeichert.
 settings-open-folder = Ordner öffnen
+settings-relations = BEZIEHUNGEN
+settings-relations-help = Selbst eingegebene Linien-Namen. Sie werden beim Zeichnen einer Linie wieder angeboten; gib jedem einen Namen pro Sprache. Umbenennen benennt auch die Linien um, die ihn verwenden.
+settings-no-relations = Noch keine eigenen Beziehungen. Gib beim Erstellen einer Linie einen neuen Namen ein.
+settings-remove-relation = Aus den Vorschlägen entfernen (Linien behalten ihren Namen)
 settings-switch-workspace = ARBEITSBEREICH WECHSELN
 settings-switch-workspace-help = Wähle einen Ordner, um ihn als Arbeitsbereich zu öffnen. Ein neuer oder leerer Ordner wird zu einem neuen Arbeitsbereich.
 settings-browse = Durchsuchen…

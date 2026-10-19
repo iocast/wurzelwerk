@@ -1605,6 +1605,11 @@ impl Routes {
         }
     }
 
+    /// Places the automatic labels again, e.g. after the language changed their texts.
+    pub fn relabel(&mut self, data: &Data) {
+        self.finish(data);
+    }
+
     /// Updates the obstacle index; returns the moved card areas (`None` = everything).
     fn sync_people(&mut self, people: &[Person]) -> Option<Vec<Rectangle>> {
         let grown = |at: Point| grow(card_at(at), ROUTE_CLEARANCE, ROUTE_CLEARANCE);
@@ -1695,7 +1700,7 @@ impl Routes {
             }
             let route = &self.entries[&link.id].route;
             let (at, centered) = label_layout(link, route);
-            placed.insert(label_rect(at, centered, label_width(&link.label, LABEL_TEXT)));
+            placed.insert(label_rect(at, centered, label_width(&data.link_label(&link.label), LABEL_TEXT)));
         }
         for link in &links {
             if link.label.is_empty() || link.label_position.is_some() {
@@ -1704,7 +1709,7 @@ impl Routes {
             let Some(entry) = self.entries.get_mut(&link.id) else {
                 continue;
             };
-            let width = label_width(&link.label, LABEL_TEXT);
+            let width = label_width(&data.link_label(&link.label), LABEL_TEXT);
             let chosen = label_candidates(&entry.route.points, width)
                 .into_iter()
                 .find(|&(at, centered)| {

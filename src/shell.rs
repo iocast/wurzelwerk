@@ -347,7 +347,8 @@ impl Shell {
                 i18n::set(lang);
                 self.save_settings();
                 if let Some(app) = &mut self.app {
-                    // text drawn on the canvas is cached
+                    // line labels change width; text drawn on the canvas is cached
+                    app.routes.relabel(&app.data);
                     app.cache.clear();
                 }
             }
@@ -802,6 +803,11 @@ impl Shell {
                 .padding(14)
                 .style(ui::section_card),
             ));
+            page = page.push(setting(
+                t("settings-relations"),
+                t("settings-relations-help"),
+                relations_editor(app),
+            ));
         }
 
         let mut switch = Column::new().spacing(8).push(self.path_row(t("settings-open")));
@@ -961,6 +967,50 @@ fn setting<'a>(
     ]
     .spacing(10)
     .into()
+}
+
+/// The workspace's own line names, one row each: the name in every language and a remove button.
+fn relations_editor(app: &App) -> Element<'_, ShellMessage> {
+    if app.data.relations.is_empty() {
+        return hint(t("settings-no-relations")).into();
+    }
+    let header = Row::with_children(Lang::LANGUAGES.map(|lang| {
+        text(lang.to_string())
+            .size(11)
+            .font(ui::SEMIBOLD)
+            .color(ui::pal().muted)
+            .width(Length::Fill)
+            .into()
+    }))
+    .push(space().width(30))
+    .spacing(8);
+    let rows = app.data.relations.iter().map(|r| {
+        Row::with_children(Lang::LANGUAGES.map(|lang| {
+            let (id, code) = (r.id.clone(), lang.code());
+            text_input(r.name(), r.names.get(code).map_or("", String::as_str))
+                .on_input(move |name| {
+                    ShellMessage::App(Message::RenameRelation(id.clone(), code, name))
+                })
+                .padding([6, 10])
+                .size(13)
+                .style(ui::input)
+                .width(Length::Fill)
+                .into()
+        }))
+        .push(tip(
+            button(icon("✕").size(12))
+                .padding([6, 8])
+                .style(ui::secondary)
+                .on_press(ShellMessage::App(Message::DeleteRelation(r.id.clone()))),
+            t("settings-remove-relation"),
+        ))
+        .spacing(8)
+        .align_y(alignment::Vertical::Center)
+        .into()
+    });
+    Column::with_children(std::iter::once(header.into()).chain(rows))
+        .spacing(6)
+        .into()
 }
 
 /// `[✦ Open example workspace]  <where it lives>`

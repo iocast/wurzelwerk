@@ -31,7 +31,7 @@ use crate::model::{
     PALETTE, Person, link_style, new_id, year_num,
 };
 use crate::spatial::{self, Grid, Hull};
-use crate::store::{CLANS, Cmd, Db, FILES, LINKS, PEOPLE};
+use crate::store::{CLANS, Cmd, Db, FILES, LINKS, PEOPLE, RELATIONS};
 use crate::ui;
 
 const SIDEBAR_W: f32 = 256.0;
@@ -233,12 +233,17 @@ pub enum Message {
     ClanLabelDropped(Id),
     // line naming
     LinkLabel(String),
-    LinkPreset(&'static str),
+    LinkPreset(String),
     ConfirmLink,
     CancelLink,
     DeleteLink(Id),
     EditLinkLabel(String),
-    SetLinkLabel(&'static str),
+    SetLinkLabel(String),
+    /// Keeps the selected line's name as a relation (Enter in its name field).
+    RememberLinkLabel,
+    // relations (workspace settings)
+    RenameRelation(Id, &'static str, String),
+    DeleteRelation(Id),
     // confirmation
     AskDelete(Confirm),
     ConfirmDelete,
@@ -288,6 +293,15 @@ impl App {
             db.send(Cmd::put(FILES, &rec.id, &rec, false));
         }
         notes::migrate_legacy(&cfg.project);
+        // workspaces from before relations existed: their own line names become relations
+        if data.relations.is_empty() {
+            let labels: Vec<String> = data.links.iter().map(|l| l.label.clone()).collect();
+            for label in labels {
+                if let Some(r) = data.remember_relation(&label) {
+                    db.send(Cmd::put(RELATIONS, &r.id, r, true));
+                }
+            }
+        }
 
         if data.people.is_empty()
             && let Some((clans, per_clan)) = cfg.demo
@@ -596,6 +610,21 @@ impl App {
         if let Some(c) = self.data.clan(id) {
             self.db.send(Cmd::put(CLANS, &c.id, c, false));
         }
+    }
+
+    fn remember_relation(&mut self, label: &str) {
+        if let Some(r) = self.data.remember_relation(label) {
+            self.db.send(Cmd::put(RELATIONS, &r.id, r, true));
+        }
+    }
+
+    /// Suggested line names (in the active language), then the workspace's own ones.
+    fn relation_names(&self) -> impl Iterator<Item = &str> {
+        LINK_PRESETS
+            .iter()
+            .map(|&id| t(id))
+            .chain(self.data.relations.iter().map(|r| r.name()))
+            .filter(|name| !name.is_empty())
     }
 
     fn save_link(&self, id: &str) {
@@ -1050,7 +1079,7 @@ impl App {
             }
             Message::LinkPreset(label) => {
                 if let Some(pl) = &mut self.pending_link {
-                    pl.label = label.to_string();
+                    pl.label = label;
                 }
                 return Task::done(Message::ConfirmLink);
             }
@@ -1072,6 +1101,7 @@ impl App {
                         end_port: None,
                     };
                     self.db.send(Cmd::put(LINKS, &link.id, &link, true));
+                    self.remember_relation(&link.label);
                     self.data.links.push(link);
                     if self.tool == Tool::Connect {
                         self.tool = Tool::Select;
@@ -1087,7 +1117,29 @@ impl App {
                     self.save_link(&id);
                 }
             }
-            Message::SetLinkLabel(label) => return self.handle(Message::EditLinkLabel(label.into())),
+            Message::SetLinkLabel(label) => return self.handle(Message::EditLinkLabel(label)),
+            Message::RememberLinkLabel => {
+                if let Some(label) = self
+                    .selected_link
+                    .as_ref()
+                    .and_then(|id| self.data.links.iter().find(|l| &l.id == id))
+                    .map(|l| l.label.clone())
+                {
+                    self.remember_relation(&label);
+                }
+            }
+            Message::RenameRelation(id, locale, name) => {
+                for link in self.data.rename_relation(&id, locale, name) {
+                    self.save_link(&link);
+                }
+                if let Some(r) = self.data.relations.iter().find(|r| r.id == id) {
+                    self.db.send(Cmd::put(RELATIONS, &r.id, r, false));
+                }
+            }
+            Message::DeleteRelation(id) => {
+                self.data.relations.retain(|r| r.id != id);
+                self.db.send(Cmd::del(RELATIONS, &id));
+            }
             Message::AskDelete(confirm) => self.confirm = Some(confirm),
             Message::CancelDelete => self.confirm = None,
             Message::ConfirmDelete => match self.confirm.take() {
@@ -2355,11 +2407,11 @@ impl App {
     }
 
     fn view_pending_link(&self, pl: &PendingLink) -> Element<'_, Message> {
-        let presets = Row::with_children(LINK_PRESETS.iter().map(|&label| {
+        let presets = Row::with_children(self.relation_names().map(|label| {
             button(text(label).size(12))
                 .padding([4, 10])
                 .style(ui::chip(ui::pal().accent))
-                .on_press(Message::LinkPreset(label))
+                .on_press(Message::LinkPreset(label.to_owned()))
                 .into()
         }))
         .spacing(6)
@@ -2435,8 +2487,9 @@ impl App {
     }
 
     fn view_link(&self, link: &Link) -> Element<'_, Message> {
-        let presets = Row::with_children(LINK_PRESETS.iter().map(|&label| {
-            let active = link.label == label;
+        let shown = self.data.link_label(&link.label);
+        let presets = Row::with_children(self.relation_names().map(|label| {
+            let active = shown == label;
             button(text(label).size(12))
                 .padding([4, 10])
                 .style(if active {
@@ -2444,7 +2497,7 @@ impl App {
                 } else {
                     ui::chip(ui::pal().subtle)
                 })
-                .on_press(Message::SetLinkLabel(label))
+                .on_press(Message::SetLinkLabel(label.to_owned()))
                 .into()
         }))
         .spacing(6)
@@ -2484,8 +2537,9 @@ impl App {
             card(
                 t("line-relationship"),
                 column![
-                    text_input(t("line-name-placeholder"), &link.label)
+                    text_input(t("line-name-placeholder"), &shown)
                         .on_input(Message::EditLinkLabel)
+                        .on_submit(Message::RememberLinkLabel)
                         .padding([8, 10])
                         .size(13)
                         .style(ui::input),
@@ -2633,7 +2687,9 @@ impl App {
                                 text(other_name).size(13).wrapping(text::Wrapping::None),
                                 row![
                                     icon(arrow).size(11).color(ui::pal().subtle),
-                                    text(l.label.as_str()).size(11).color(ui::pal().muted),
+                                    text(self.data.link_label(&l.label).into_owned())
+                                        .size(11)
+                                        .color(ui::pal().muted),
                                 ]
                                 .spacing(4),
                             ]

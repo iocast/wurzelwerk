@@ -13,6 +13,7 @@
 //!   just read the cache.
 //! * Interactive feedback (line being drawn) lives in an uncached overlay frame.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use iced::font::Weight;
@@ -783,7 +784,7 @@ fn link_label_hit<'a>(
         }
         let route = app.routes.get(&link.id)?;
         let (label_at, centered) = label_layout(link, route);
-        let width = label_width(&link.label, text_size);
+        let width = label_width(&app.data.link_label(&link.label), text_size);
         let screen_at = cam.to_screen(label_at);
         let left = if centered {
             screen_at.x - width / 2.0
@@ -1577,7 +1578,7 @@ fn draw_edges(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
     let mut dashed: Vec<&Route> = Vec::new();
     let mut selected: Option<&Route> = None;
     let mut arrows: Vec<[Point; 3]> = Vec::new();
-    let mut labels: Vec<(Point, bool, &str)> = Vec::new();
+    let mut labels: Vec<(Point, bool, Cow<str>)> = Vec::new();
     let arrow = (8.0 * z).clamp(3.0, 9.0);
     let show_labels = z >= LOD_EDGE_LABELS;
     let label_size = LABEL_TEXT * z.min(1.4);
@@ -1592,7 +1593,7 @@ fn draw_edges(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
         let label = (show_labels && !link.label.is_empty()).then(|| label_layout(link, r));
         let mut bbox = r.bbox;
         if let Some((at, centered)) = label {
-            let width = label_width(&link.label, label_size) / z;
+            let width = label_width(&app.data.link_label(&link.label), label_size) / z;
             let left = if centered { at.x - width / 2.0 } else { at.x };
             let x1 = (bbox.x + bbox.width).max(left + width);
             let y1 = (bbox.y + bbox.height).max(at.y + label_size / z);
@@ -1628,7 +1629,11 @@ fn draw_edges(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
             ]);
         }
         if let Some((at, centered)) = label {
-            labels.push((cam.to_screen(at), centered, link.label.as_str()));
+            labels.push((
+                cam.to_screen(at),
+                centered,
+                app.data.link_label(&link.label),
+            ));
         }
         match style {
             LinkStyle::Dashed => dashed.push(r),
@@ -1715,7 +1720,7 @@ fn draw_edges(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
     for (at, centered, label) in labels {
         text(
             frame,
-            label.to_string(),
+            label.into_owned(),
             at,
             label_size,
             ui::pal().muted,
