@@ -5,6 +5,15 @@ Format: Keep a Changelog (https://keepachangelog.com), versioning: Semantic Vers
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-19
+
+### Added
+- Own relationships: line names you type are offered again when drawing a line; *Settings → Workspace → Relationships* gives each a name per language, renames the lines that use it, and removes it from the suggestions
+
+### Changed
+- Suggested line names (`married`, `father of`, …) and own relationships are shown in the current language, also on lines created in another language (`married 1789` reads `verheiratet 1789` in German)
+- Zooming and panning large boards is smooth at every zoom level, and hovering over lines no longer slows down as the board grows
+
 ## [0.2.2] - 2026-10-15
 
 ### Fixed
@@ -58,7 +67,8 @@ Format: Keep a Changelog (https://keepachangelog.com), versioning: Semantic Vers
 - Update check against the latest GitHub release at start-up or via *Settings → Updates → Check now*; can be turned off
 - Large boards with 10 000 people stay smooth; `--demo RxC` generates such a board for load testing
 
-[unreleased]: https://github.com/iocast/wurzelwerk/compare/v0.2.2...HEAD
+[unreleased]: https://github.com/iocast/wurzelwerk/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/iocast/wurzelwerk/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/iocast/wurzelwerk/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/iocast/wurzelwerk/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/iocast/wurzelwerk/compare/v0.1.3...v0.2.0
