@@ -15,7 +15,7 @@ use iced::widget::{
 };
 use iced::{
     Color, Element, Event, Length, Padding, Point, Rectangle, Size, Subscription, Task, Vector,
-    alignment, event, keyboard, window,
+    alignment, event, keyboard, task, window,
 };
 
 use crate::board::{Board, Snapshot, World};
@@ -148,8 +148,9 @@ pub struct App {
     pub snapshot: Cell<Option<Snapshot>>,
     /// Text of the snapshot, in its space; drawn per frame (see `board::World`).
     pub snapshot_text: RefCell<Vec<canvas::Text>>,
-    /// Last zoom; the board is re-tessellated at the exact zoom once it settles.
-    zoomed_at: Option<Instant>,
+    /// Timer of the last zoom; the board is re-tessellated at the exact zoom once it
+    /// fires. Replacing it aborts the previous timer.
+    settle: Option<task::Handle>,
     pub tool: Tool,
     pub selected: Option<Id>,
     pub selected_link: Option<Id>,
@@ -343,7 +344,7 @@ impl App {
             cache: canvas::Cache::new(),
             snapshot: Cell::new(None),
             snapshot_text: RefCell::new(Vec::new()),
-            zoomed_at: None,
+            settle: None,
             tool: Tool::Select,
             selected: None,
             selected_link: None,
@@ -411,9 +412,6 @@ impl App {
             || self.note.as_ref().is_some_and(|n| n.dirty)
         {
             subs.push(iced::time::every(Duration::from_millis(400)).map(|_| Message::Tick));
-        }
-        if self.zoomed_at.is_some() {
-            subs.push(iced::time::every(ZOOM_SETTLE / 2).map(|_| Message::ZoomSettled));
         }
         if self.playing {
             subs.push(iced::time::every(TIMELINE_STEP).map(|_| Message::TimelineStep));
@@ -680,12 +678,10 @@ impl App {
                 | Message::PanBy(_)
                 | Message::FitToWindow
         );
-        if matches!(
+        let zoomed = matches!(
             message,
             Message::ZoomAt(..) | Message::ZoomStep(_) | Message::ZoomReset | Message::FitToWindow
-        ) {
-            self.zoomed_at = Some(Instant::now());
-        }
+        );
         // camera-only messages never move cards or change lines
         let geometry = redraw
             && !matches!(
@@ -713,6 +709,14 @@ impl App {
         }
         if redraw && !camera_only {
             self.cache.clear();
+        }
+        if zoomed {
+            // one message once zooming pauses, instead of ticking while it goes on
+            let (settled, handle) = Task::future(tokio::time::sleep(ZOOM_SETTLE))
+                .map(|()| Message::ZoomSettled)
+                .abortable();
+            self.settle = Some(handle.abort_on_drop());
+            return Task::batch([task, settled]);
         }
         task
     }
@@ -1338,11 +1342,9 @@ impl App {
                 }
             }
             Message::ZoomSettled => {
-                if self.zoomed_at.is_some_and(|at| at.elapsed() >= ZOOM_SETTLE) {
-                    self.zoomed_at = None;
-                    if self.snapshot.get().is_some_and(|s| s.scaled(self.camera)) {
-                        self.cache.clear();
-                    }
+                self.settle = None;
+                if self.snapshot.get().is_some_and(|s| s.scaled(self.camera)) {
+                    self.cache.clear();
                 }
             }
             Message::OpenSettings(_) => {}

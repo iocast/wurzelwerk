@@ -7710,6 +7710,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sys-locale",
+ "tokio",
  "unic-langid",
  "ureq",
  "uuid",
