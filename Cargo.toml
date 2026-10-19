@@ -8,15 +8,15 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 # UI - GPU (wgpu) renderer, canvas for the board, tokio executor for async tasks/timers
-iced = { version = "0.14.0", features = ["canvas", "image", "tokio"] }
+iced = { version = "0.14.0", features = ["advanced", "canvas", "image", "tokio"] }
 # Embedded multi-model DB (crate name reddb-io, import path `reddb::`)
-reddb-io = { version = "1.23.4", features = ["embedded"] }
-reddb_types = { package = "reddb-io-types", version = "1.23.4" }
+reddb-io = { version = "1.24.7", features = ["embedded"] }
+reddb_types = { package = "reddb-io-types", version = "1.24.7" }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+serde_json = "1.0.154"
 uuid = { version = "1.28.0", features = ["v4"] }
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
-iced-markdown-editor = "0.3.0"
+iced-markdown-editor = "0.3.1"
 ureq = { version = "3.4.2", features = ["json"] }
 sys-locale = "0.3.2"
 cargo-packager-updater = "0.2.3"
@@ -24,7 +24,7 @@ fluent-bundle = "0.16.0"
 unic-langid = "0.9.6"
 
 [build-dependencies]
-winresource = "0.1.31" # embeds assets/icon.ico into the Windows exe (build.rs)
+winresource = "0.1.34" # embeds assets/icon.ico into the Windows exe (build.rs)
 
 # Installers (cargo packager): built by .github/workflows/release.yml, written to target/packages.
 [package.metadata.packager]

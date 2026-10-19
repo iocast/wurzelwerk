@@ -1,5 +1,6 @@
 //! Application state, update and view (toolbar · clans/people · board · inspector · status).
 
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::PathBuf;
@@ -17,7 +18,7 @@ use iced::{
     alignment, event, keyboard, window,
 };
 
-use crate::board::Board;
+use crate::board::{Board, Snapshot, World};
 use crate::camera::Camera;
 use crate::files;
 use crate::i18n::{t, tf};
@@ -38,6 +39,8 @@ const SIDEBAR_W: f32 = 256.0;
 const INSPECTOR_W: f32 = 330.0;
 const TOOLBAR_H: f32 = 54.0;
 const STATUS_H: f32 = 28.0;
+/// Quiet time after zooming before the scaled board is re-tessellated sharply.
+const ZOOM_SETTLE: Duration = Duration::from_millis(160);
 const MAX_PEOPLE_LIST: usize = 150;
 const MAX_LINES_LIST: usize = 100;
 /// Notices (toasts) disappear after this long.
@@ -141,6 +144,12 @@ pub struct App {
     pub camera: Camera,
     pub canvas_size: Size,
     pub cache: canvas::Cache,
+    /// Camera and size `cache` was tessellated for (set while drawing).
+    pub snapshot: Cell<Option<Snapshot>>,
+    /// Text of the snapshot, in its space; drawn per frame (see `board::World`).
+    pub snapshot_text: RefCell<Vec<canvas::Text>>,
+    /// Last zoom; the board is re-tessellated at the exact zoom once it settles.
+    zoomed_at: Option<Instant>,
     pub tool: Tool,
     pub selected: Option<Id>,
     pub selected_link: Option<Id>,
@@ -282,6 +291,7 @@ pub enum Message {
     DeleteKey,
     EnterKey,
     Tick,
+    ZoomSettled,
 }
 
 impl App {
@@ -331,6 +341,9 @@ impl App {
             camera: Camera::default(),
             canvas_size: Size::ZERO,
             cache: canvas::Cache::new(),
+            snapshot: Cell::new(None),
+            snapshot_text: RefCell::new(Vec::new()),
+            zoomed_at: None,
             tool: Tool::Select,
             selected: None,
             selected_link: None,
@@ -398,6 +411,9 @@ impl App {
             || self.note.as_ref().is_some_and(|n| n.dirty)
         {
             subs.push(iced::time::every(Duration::from_millis(400)).map(|_| Message::Tick));
+        }
+        if self.zoomed_at.is_some() {
+            subs.push(iced::time::every(ZOOM_SETTLE / 2).map(|_| Message::ZoomSettled));
         }
         if self.playing {
             subs.push(iced::time::every(TIMELINE_STEP).map(|_| Message::TimelineStep));
@@ -649,8 +665,27 @@ impl App {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let redraw = !matches!(
             message,
-            Message::Tick | Message::Search(_) | Message::DismissNotice | Message::FocusSearch
+            Message::Tick
+                | Message::ZoomSettled
+                | Message::Search(_)
+                | Message::DismissNotice
+                | Message::FocusSearch
         );
+        // the cached board is only moved and scaled on the GPU for these (see `board::World`)
+        let camera_only = matches!(
+            message,
+            Message::ZoomAt(..)
+                | Message::ZoomStep(_)
+                | Message::ZoomReset
+                | Message::PanBy(_)
+                | Message::FitToWindow
+        );
+        if matches!(
+            message,
+            Message::ZoomAt(..) | Message::ZoomStep(_) | Message::ZoomReset | Message::FitToWindow
+        ) {
+            self.zoomed_at = Some(Instant::now());
+        }
         // camera-only messages never move cards or change lines
         let geometry = redraw
             && !matches!(
@@ -676,7 +711,7 @@ impl App {
             // incremental: only lines near moved cards or with edited inputs are re-routed
             self.routes.sync(&self.data);
         }
-        if redraw {
+        if redraw && !camera_only {
             self.cache.clear();
         }
         task
@@ -1302,6 +1337,14 @@ impl App {
                     self.notice_at = None;
                 }
             }
+            Message::ZoomSettled => {
+                if self.zoomed_at.is_some_and(|at| at.elapsed() >= ZOOM_SETTLE) {
+                    self.zoomed_at = None;
+                    if self.snapshot.get().is_some_and(|s| s.scaled(self.camera)) {
+                        self.cache.clear();
+                    }
+                }
+            }
             Message::OpenSettings(_) => {}
 
             Message::OpenNote(key) => self.open_note(key),
@@ -1604,6 +1647,7 @@ impl App {
         }
 
         let mut layers = stack![
+            World { app: self },
             canvas(Board { app: self })
                 .width(Length::Fill)
                 .height(Length::Fill)

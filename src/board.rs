@@ -1,8 +1,10 @@
 //! The board: an iced `canvas` rendered by wgpu.
 //!
 //! Performance strategy for very large boards (many clans × many people):
-//! * **Static layer cached** in a `canvas::Cache` - tessellated once, then only
-//!   re-uploaded GPU geometry is drawn until data or camera change.
+//! * **Static layer cached** in a `canvas::Cache` - tessellated once for an area larger
+//!   than the canvas (a `Snapshot`); zooming and panning only change the transformation
+//!   the GPU applies to it (`World`). It is re-tessellated when the data changes, the view
+//!   leaves the snapshot, the zoom crosses a level of detail or settles after zooming.
 //! * **Viewport culling** through a uniform spatial grid - only visible nodes are touched.
 //! * **Batched paths** - all node bodies, all solid edges, all dashed edges, all arrows,
 //!   all clan dots of one colour are each a *single* path -> very few draw calls.
@@ -17,9 +19,16 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use iced::font::Weight;
+use iced::advanced::graphics::geometry::Renderer as _;
+use iced::advanced::renderer::{self, Renderer as _};
+use iced::advanced::widget::Tree;
+use iced::advanced::{Layout, Widget, layout};
 use iced::mouse;
 use iced::widget::canvas::{self, Frame, Geometry, LineDash, Path, Stroke, path::Builder};
-use iced::{Color, Font, Pixels, Point, Rectangle, Renderer, Size, Theme, Vector, alignment};
+use iced::{
+    Color, Element, Font, Length, Pixels, Point, Rectangle, Renderer, Size, Theme,
+    Transformation, Vector, alignment,
+};
 
 use crate::app::{App, Message, Tool};
 use crate::camera::Camera;
@@ -34,6 +43,21 @@ const LOD_EDGES: f32 = 0.12;
 const LOD_EDGE_LABELS: f32 = 0.7;
 const LOD_GRID: f32 = 0.6;
 const LOD_HANDLES: f32 = 0.3;
+const LOD_CLAN_LABELS: f32 = 0.08;
+/// Zoom levels at which the static layer changes beyond plain scaling.
+const LOD_STEPS: [f32; 7] = [
+    LOD_BLOCKS,
+    LOD_CLAN_LABELS,
+    LOD_EDGES,
+    LOD_HANDLES,
+    LOD_DETAIL,
+    LOD_GRID,
+    LOD_EDGE_LABELS,
+];
+/// Extra area tessellated around the canvas, as a fraction of its size per side.
+const SNAPSHOT_MARGIN: f32 = 0.5;
+/// Zoom range (relative to the snapshot) shown by scaling before re-tessellating.
+const SNAPSHOT_SCALE: std::ops::RangeInclusive<f32> = 0.67..=1.5;
 
 pub struct Board<'a> {
     pub app: &'a App,
@@ -315,10 +339,6 @@ impl canvas::Program<Message> for Board<'_> {
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let app = self.app;
-        let board = app
-            .cache
-            .draw(renderer, bounds.size(), |frame| draw_board(app, frame));
-
         let mut overlay = Frame::new(renderer, bounds.size());
         if let Interaction::Connecting { from, cursor, port } = state
             && let Some(p) = app.data.person(from)
@@ -348,7 +368,7 @@ impl canvas::Program<Message> for Board<'_> {
             overlay.fill(&Path::circle(*cursor, 4.0), ui::pal().selection);
         }
 
-        vec![board, overlay.into_geometry()]
+        vec![overlay.into_geometry()]
     }
 
     fn mouse_interaction(
@@ -573,11 +593,164 @@ pub fn handle_points(p: &Person, cam: &Camera) -> [Point; 2] {
 // static layer
 // ---------------------------------------------------------------------------
 
-fn draw_board(app: &App, frame: &mut Frame) {
+/// Board area tessellated into `App::cache`, in its own screen space.
+#[derive(Debug, Clone, Copy)]
+pub struct Snapshot {
+    pub cam: Camera,
+    pub size: Size,
+}
+
+impl Snapshot {
+    fn around(cam: Camera, canvas: Size) -> Self {
+        let margin = Vector::new(canvas.width * SNAPSHOT_MARGIN, canvas.height * SNAPSHOT_MARGIN);
+        Self {
+            cam: Camera {
+                offset: Vector::new(
+                    cam.offset.x - margin.x / cam.zoom,
+                    cam.offset.y - margin.y / cam.zoom,
+                ),
+                zoom: cam.zoom,
+            },
+            size: Size::new(canvas.width + 2.0 * margin.x, canvas.height + 2.0 * margin.y),
+        }
+    }
+
+    /// Whether `cam` can be shown by only scaling and moving this snapshot.
+    fn covers(&self, cam: Camera, canvas: Size) -> bool {
+        let region = self.cam.visible_world(self.size);
+        let view = cam.visible_world(canvas);
+        let (low, high) = (self.cam.zoom.min(cam.zoom), self.cam.zoom.max(cam.zoom));
+        SNAPSHOT_SCALE.contains(&(cam.zoom / self.cam.zoom))
+            && !LOD_STEPS.iter().any(|&step| low < step && step <= high)
+            && view.x >= region.x
+            && view.y >= region.y
+            && view.x + view.width <= region.x + region.width
+            && view.y + view.height <= region.y + region.height
+    }
+
+    /// Snapshot space -> canvas space under `cam`.
+    fn transformation(&self, cam: Camera) -> Transformation {
+        let origin = cam.to_screen(Point::new(self.cam.offset.x, self.cam.offset.y));
+        Transformation::translate(origin.x, origin.y)
+            * Transformation::scale(cam.zoom / self.cam.zoom)
+    }
+
+    /// Drawn at a zoom other than the current one (sharpened once zooming settles).
+    pub fn scaled(&self, cam: Camera) -> bool {
+        self.cam.zoom != cam.zoom
+    }
+}
+
+/// The static board layer: cached geometry placed by a GPU transformation, so zooming
+/// and panning skip tessellation. Interaction and the overlay stay in the `Board` canvas.
+pub struct World<'a> {
+    pub app: &'a App,
+}
+
+impl Widget<Message, Theme, Renderer> for World<'_> {
+    fn size(&self) -> Size<Length> {
+        Size::new(Length::Fill, Length::Fill)
+    }
+
+    fn layout(
+        &mut self,
+        _tree: &mut Tree,
+        _renderer: &Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        layout::Node::new(limits.max())
+    }
+
+    fn draw(
+        &self,
+        _tree: &Tree,
+        renderer: &mut Renderer,
+        _theme: &Theme,
+        _style: &renderer::Style,
+        layout: Layout<'_>,
+        _cursor: mouse::Cursor,
+        _viewport: &Rectangle,
+    ) {
+        let bounds = layout.bounds();
+        if bounds.width < 1.0 || bounds.height < 1.0 {
+            return;
+        }
+        let app = self.app;
+        let cam = app.camera;
+        if !app
+            .snapshot
+            .get()
+            .is_some_and(|snapshot| snapshot.covers(cam, bounds.size()))
+        {
+            app.cache.clear();
+        }
+        let fresh = Snapshot::around(cam, bounds.size());
+        let geometry = app.cache.draw(renderer, fresh.size, |frame| {
+            app.snapshot.set(Some(fresh));
+            app.snapshot_text.borrow_mut().clear();
+            draw_board(app, frame, fresh.cam);
+        });
+        let Some(snapshot) = app.snapshot.get() else {
+            return;
+        };
+        let to_canvas = snapshot.transformation(cam);
+        let labels = snapshot_labels(app, renderer, bounds.size(), to_canvas);
+        renderer.with_layer(bounds, |renderer| {
+            renderer.with_translation(Vector::new(bounds.x, bounds.y), |renderer| {
+                renderer.with_transformation(to_canvas, |renderer| {
+                    renderer.draw_geometry(geometry);
+                });
+                renderer.draw_geometry(labels);
+            });
+        });
+    }
+}
+
+/// The snapshot's text placed on the canvas. Scaled text in a cached geometry would be
+/// re-laid-out and re-rasterized every zoom frame, so only visible text is drawn, at
+/// font sizes snapped to ~9% steps while zooming so glyphs stay in the atlas.
+fn snapshot_labels(
+    app: &App,
+    renderer: &Renderer,
+    canvas: Size,
+    to_canvas: Transformation,
+) -> Geometry {
+    const MARGIN: f32 = 400.0;
+    let scale = to_canvas.scale_factor();
+    let font_scale = if scale == 1.0 {
+        1.0
+    } else {
+        2f32.powf((scale.log2() * 8.0).round() / 8.0)
+    };
+    let mut frame = Frame::new(renderer, canvas);
+    for label in app.snapshot_text.borrow().iter() {
+        let at = label.position * to_canvas;
+        if at.x < -MARGIN
+            || at.y < -MARGIN
+            || at.x > canvas.width + MARGIN
+            || at.y > canvas.height + MARGIN
+        {
+            continue;
+        }
+        frame.fill_text(canvas::Text {
+            position: at,
+            size: Pixels(label.size.0 * font_scale),
+            ..label.clone()
+        });
+    }
+    frame.into_geometry()
+}
+
+impl<'a> From<World<'a>> for Element<'a, Message> {
+    fn from(world: World<'a>) -> Self {
+        Element::new(world)
+    }
+}
+
+fn draw_board(app: &App, frame: &mut Frame, cam: Camera) {
     let size = frame.size();
     frame.fill_rectangle(Point::ORIGIN, size, ui::pal().board);
 
-    let cam = app.camera;
     let z = cam.zoom;
     let view = cam.visible_world(size);
 
@@ -597,21 +770,22 @@ fn draw_board(app: &App, frame: &mut Frame) {
     draw_nodes(app, frame, &cam, view);
 }
 
+/// Dots via `fill_rectangle`: lyon's rectangle fast path. As one path, the tens of
+/// thousands of dots went through the general sweep-line fill (~10x the whole board).
 fn draw_grid(frame: &mut Frame, cam: &Camera, view: Rectangle) {
     let step = 24.0;
-    let dots = Path::new(|b| {
-        let mut wy = (view.y / step).floor() * step;
-        while wy <= view.y + view.height {
-            let mut wx = (view.x / step).floor() * step;
-            while wx <= view.x + view.width {
-                let s = cam.to_screen(Point::new(wx, wy));
-                b.rectangle(Point::new(s.x - 0.75, s.y - 0.75), Size::new(1.5, 1.5));
-                wx += step;
-            }
-            wy += step;
+    let dot = Size::new(1.5, 1.5);
+    let color = ui::pal().grid_dot;
+    let mut wy = (view.y / step).floor() * step;
+    while wy <= view.y + view.height {
+        let mut wx = (view.x / step).floor() * step;
+        while wx <= view.x + view.width {
+            let s = cam.to_screen(Point::new(wx, wy));
+            frame.fill_rectangle(Point::new(s.x - 0.75, s.y - 0.75), dot, color);
+            wx += step;
         }
-    });
-    frame.fill(&dots, ui::pal().grid_dot);
+        wy += step;
+    }
 }
 
 fn draw_hulls(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
@@ -636,7 +810,7 @@ fn draw_hulls(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
         });
         frame.fill(&path, Color { a: 0.16, ..color });
 
-        if cam.zoom >= 0.08 {
+        if cam.zoom >= LOD_CLAN_LABELS {
             let label = format!("{} · {}", clan.name, hull.members);
             let w = label.chars().count() as f32 * 6.6 + 18.0;
             let center = cam.to_screen(Point::new(
@@ -652,7 +826,7 @@ fn draw_hulls(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
                 )
             });
             frame.fill(&pill, color);
-            text(frame, label, center, 11.5, Color::WHITE, true, true);
+            text(app, label, center, 11.5, Color::WHITE, true, true);
         }
     }
 }
@@ -689,7 +863,7 @@ fn draw_empty_clans(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle)
             },
         );
 
-        if z >= 0.08 {
+        if z >= LOD_CLAN_LABELS {
             let label = clan.name.clone();
             let w = label.chars().count() as f32 * 6.6 + 18.0;
             let center = Point::new(origin.x + w / 2.0, origin.y);
@@ -702,11 +876,11 @@ fn draw_empty_clans(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle)
                 )
             });
             frame.fill(&pill, color);
-            text(frame, label, center, 11.5, Color::WHITE, true, true);
+            text(app, label, center, 11.5, Color::WHITE, true, true);
         }
         if z >= LOD_DETAIL {
             text(
-                frame,
+                app,
                 t("sidebar-empty-clan").to_owned(),
                 Point::new(origin.x + size.width / 2.0, origin.y + size.height * 0.58),
                 11.5 * z,
@@ -778,14 +952,18 @@ fn link_label_hit<'a>(
         return None;
     }
     let text_size = LABEL_TEXT * cam.zoom.min(1.4);
+    // runs on every hover: rule out other label rows before the costly label text
     app.data.links.iter().rev().find_map(|link| {
-        if link.label.is_empty() || !app.link_shown(link) {
+        if link.label.is_empty() {
             return None;
         }
         let route = app.routes.get(&link.id)?;
         let (label_at, centered) = label_layout(link, route);
-        let width = label_width(&app.data.link_label(&link.label), text_size);
         let screen_at = cam.to_screen(label_at);
+        if (pos.y - screen_at.y).abs() > text_size || !app.link_shown(link) {
+            return None;
+        }
+        let width = label_width(&app.data.link_label(&link.label), text_size);
         let left = if centered {
             screen_at.x - width / 2.0
         } else {
@@ -828,14 +1006,12 @@ fn link_segment_hit<'a>(
         let Some(route) = app.routes.get(&link.id) else {
             continue;
         };
-        if !app.link_shown(link) {
-            continue;
-        }
         let bbox = route.bbox;
         if world.x < bbox.x - slack
             || world.x > bbox.x + bbox.width + slack
             || world.y < bbox.y - slack
             || world.y > bbox.y + bbox.height + slack
+            || !app.link_shown(link)
         {
             continue;
         }
@@ -958,7 +1134,7 @@ fn move_route_vertex(
 }
 
 fn clan_label_hit<'a>(app: &'a App, cam: &Camera, pos: Point) -> Option<&'a crate::model::Clan> {
-    if cam.zoom < 0.08 {
+    if cam.zoom < LOD_CLAN_LABELS {
         return None;
     }
     app.data.clans.iter().rev().find(|clan| {
@@ -1591,21 +1767,21 @@ fn draw_edges(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
             continue;
         }
         let label = (show_labels && !link.label.is_empty()).then(|| label_layout(link, r));
-        let mut bbox = r.bbox;
-        if let Some((at, centered)) = label {
-            let width = label_width(&app.data.link_label(&link.label), label_size) / z;
-            let left = if centered { at.x - width / 2.0 } else { at.x };
-            let x1 = (bbox.x + bbox.width).max(left + width);
-            let y1 = (bbox.y + bbox.height).max(at.y + label_size / z);
-            bbox.x = bbox.x.min(left);
-            bbox.y = bbox.y.min(at.y - label_size / z);
-            bbox.width = x1 - bbox.x;
-            bbox.height = y1 - bbox.y;
-        }
-        let visible = bbox.x <= view.x + view.width
-            && bbox.x + bbox.width >= view.x
-            && bbox.y <= view.y + view.height
-            && bbox.y + bbox.height >= view.y;
+        // the shown label text is costly (relation names in every language), so it is
+        // only resolved for labels whose row is in view
+        let mut text = None;
+        let visible = r.bbox.intersects(&view)
+            || label.is_some_and(|(at, centered)| {
+                let half = label_size / z;
+                if at.y + half < view.y || at.y - half > view.y + view.height {
+                    return false;
+                }
+                let shown = app.data.link_label(&link.label);
+                let width = label_width(&shown, label_size) / z;
+                let left = if centered { at.x - width / 2.0 } else { at.x };
+                text = Some(shown);
+                left <= view.x + view.width && left + width >= view.x
+            });
         if !visible {
             continue;
         }
@@ -1632,7 +1808,7 @@ fn draw_edges(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
             labels.push((
                 cam.to_screen(at),
                 centered,
-                app.data.link_label(&link.label),
+                text.unwrap_or_else(|| app.data.link_label(&link.label)),
             ));
         }
         match style {
@@ -1649,15 +1825,11 @@ fn draw_edges(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
         );
     }
     if !dashed.is_empty() {
+        // dashed here, not via LineDash: iced carries the dash phase across subpaths
+        // and joins the end of one route to the next with a phantom segment
         frame.stroke(
-            &routes_path(&dashed, cam),
-            Stroke {
-                line_dash: LineDash {
-                    segments: &[6.0, 4.0],
-                    offset: 0,
-                },
-                ..Stroke::default().with_width(width).with_color(ui::pal().edge)
-            },
+            &dashed_routes_path(&dashed, cam, 6.0, 4.0),
+            Stroke::default().with_width(width).with_color(ui::pal().edge),
         );
     }
     if let Some(r) = selected {
@@ -1719,7 +1891,7 @@ fn draw_edges(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
     frame.fill(&backgrounds, ui::pal().board);
     for (at, centered, label) in labels {
         text(
-            frame,
+            app,
             label.into_owned(),
             at,
             label_size,
@@ -1737,6 +1909,47 @@ fn routes_path(routes: &[&Route], cam: &Camera) -> Path {
             if let Some((first, rest)) = route.points.split_first() {
                 b.move_to(cam.to_screen(*first));
                 rest.iter().for_each(|p| b.line_to(cam.to_screen(*p)));
+            }
+        }
+    })
+}
+
+/// All routes as one path of dashes in screen space; the pattern restarts on every route.
+fn dashed_routes_path(routes: &[&Route], cam: &Camera, on: f32, off: f32) -> Path {
+    Path::new(|b| {
+        for route in routes {
+            let mut drawing = true;
+            let mut left = on;
+            let mut prev: Option<Point> = None;
+            for p in route.points.iter().map(|p| cam.to_screen(*p)) {
+                let Some(mut from) = prev else {
+                    b.move_to(p);
+                    prev = Some(p);
+                    continue;
+                };
+                let (dx, dy) = (p.x - from.x, p.y - from.y);
+                let mut len = (dx * dx + dy * dy).sqrt();
+                if len > 0.0 {
+                    let (ux, uy) = (dx / len, dy / len);
+                    while len > left {
+                        from = Point::new(from.x + ux * left, from.y + uy * left);
+                        len -= left;
+                        if drawing {
+                            b.line_to(from);
+                        } else {
+                            b.move_to(from);
+                        }
+                        drawing = !drawing;
+                        left = if drawing { on } else { off };
+                    }
+                    left -= len;
+                }
+                if drawing {
+                    b.line_to(p);
+                } else {
+                    b.move_to(p);
+                }
+                prev = Some(p);
             }
         }
     })
@@ -1824,7 +2037,7 @@ fn draw_nodes(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
             let s = cam.to_screen(Point::new(p.x, p.y));
             let cx = s.x + size.width / 2.0;
             text(
-                frame,
+                app,
                 ellipsize(&p.name, 17),
                 Point::new(cx, s.y + size.height * 0.35),
                 name_size,
@@ -1841,7 +2054,7 @@ fn draw_nodes(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
             ] {
                 if present {
                     text(
-                        frame,
+                        app,
                         letter.to_owned(),
                         Point::new(mx, s.y + 8.0 * z),
                         9.0 * z,
@@ -1865,7 +2078,7 @@ fn draw_nodes(app: &App, frame: &mut Frame, cam: &Camera, view: Rectangle) {
             let y = s.y + size.height * 0.72;
             if !years.is_empty() {
                 text(
-                    frame,
+                    app,
                     years,
                     Point::new(x0, y),
                     year_size,
@@ -1983,8 +2196,9 @@ fn rounded_rect(b: &mut Builder, p: Point, s: Size, r: f32) {
     b.close();
 }
 
+/// Queues board text; it is drawn per frame by `World`, outside the scaled mesh cache.
 fn text(
-    frame: &mut Frame,
+    app: &App,
     content: String,
     at: Point,
     size: f32,
@@ -1997,7 +2211,7 @@ fn text(
     } else {
         alignment::Horizontal::Left
     };
-    frame.fill_text(canvas::Text {
+    app.snapshot_text.borrow_mut().push(canvas::Text {
         content,
         position: at,
         color,

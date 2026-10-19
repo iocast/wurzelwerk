@@ -2602,13 +2602,15 @@ dependencies = [
 
 [[package]]
 name = "iced-markdown-editor"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aee67ce217a97879519df88220f19cc4c87e97e20fa6c5b795e54fc0074d0a16"
+checksum = "daa3b8b5490f539774e164c403705fec3da02b0607886afb7701489f5307ce84"
 dependencies = [
  "ab_glyph",
+ "fluent-bundle",
  "iced",
  "pulldown-cmark",
+ "unic-langid",
  "web-time",
 ]
 
@@ -4941,9 +4943,9 @@ checksum = "03251193000f4bd3b042892be858ee50e8b3719f2b08e5833ac4353724632430"
 
 [[package]]
 name = "reddb-io"
-version = "1.23.4"
+version = "1.24.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "253d78ee6cdf217228789168570ef94de78412f0946660cbf852760d46fd8e9a"
+checksum = "743987426381cb653367bced6a0c4712b5131888f92be63eaf757b29beca2bba"
 dependencies = [
  "reddb-io-client",
  "reddb-io-file",
@@ -5088,9 +5090,9 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-types"
-version = "1.23.4"
+version = "1.24.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c33d466c4e7d7226c278e349e1ef5df2ccefa76e1c5776103149f2c2a2fb066"
+checksum = "019595480a39afa61e67d939236cefc807dceee6b987810b4a66841e12063137"
 dependencies = [
  "zstd",
 ]
@@ -5582,9 +5584,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.151"
+version = "1.0.154"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+checksum = "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6"
 dependencies = [
  "itoa",
  "memchr",
@@ -7673,9 +7675,9 @@ dependencies = [
 
 [[package]]
 name = "winresource"
-version = "0.1.31"
+version = "0.1.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0986a8b1d586b7d3e4fe3d9ea39fb451ae22869dcea4aa109d287a374d866087"
+checksum = "a2bc6d36480b829272a5bdabf08e6dca8004761c1da7e35efef800540c66221b"
 dependencies = [
  "toml",
  "version_check",
