@@ -5,6 +5,12 @@ Format: Keep a Changelog (https://keepachangelog.com), versioning: Semantic Vers
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-25
+
+### Added
+- Lines can have a period: *From year* and *To year* in the line panel, both optional and limited to the years both people were alive; invalid years are marked and not saved
+- Timeline: a line appears from its *From year* (without one, from a year in its name such as `married 1789`) and disappears once the range starts after its *To year*
+
 ## [0.3.0] - 2026-10-19
 
 ### Added
@@ -67,7 +73,8 @@ Format: Keep a Changelog (https://keepachangelog.com), versioning: Semantic Vers
 - Update check against the latest GitHub release at start-up or via *Settings → Updates → Check now*; can be turned off
 - Large boards with 10 000 people stay smooth; `--demo RxC` generates such a board for load testing
 
-[unreleased]: https://github.com/iocast/wurzelwerk/compare/v0.3.0...HEAD
+[unreleased]: https://github.com/iocast/wurzelwerk/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/iocast/wurzelwerk/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/iocast/wurzelwerk/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/iocast/wurzelwerk/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/iocast/wurzelwerk/compare/v0.2.0...v0.2.1
