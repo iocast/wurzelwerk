@@ -229,6 +229,7 @@ error-open-database = Datenbank in { $path } kann nicht geöffnet werden: { $err
 
 settings-general = Allgemein
 settings-workspace = Arbeitsbereich
+settings-relations-page = Beziehungen
 settings-updates = Updates
 settings-about = Info
 settings-close = Schliessen

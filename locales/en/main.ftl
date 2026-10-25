@@ -226,6 +226,7 @@ error-open-database = cannot open the database in { $path }: { $error }
 
 settings-general = General
 settings-workspace = Workspace
+settings-relations-page = Relationships
 settings-updates = Updates
 settings-about = About
 settings-close = Close

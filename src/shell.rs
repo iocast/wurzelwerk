@@ -29,17 +29,26 @@ const DIALOG_H: f32 = 560.0;
 pub enum SettingsPage {
     General,
     Workspace,
+    /// Translations of the workspace's own line names; only listed when there are some.
+    Relations,
     Updates,
     About,
 }
 
 impl SettingsPage {
-    const ALL: [SettingsPage; 4] = [Self::General, Self::Workspace, Self::Updates, Self::About];
+    const ALL: [SettingsPage; 5] = [
+        Self::General,
+        Self::Workspace,
+        Self::Relations,
+        Self::Updates,
+        Self::About,
+    ];
 
     fn label(self) -> &'static str {
         match self {
             Self::General => t("settings-general"),
             Self::Workspace => t("settings-workspace"),
+            Self::Relations => t("settings-relations-page"),
             Self::Updates => t("settings-updates"),
             Self::About => t("settings-about"),
         }
@@ -49,6 +58,7 @@ impl SettingsPage {
         match self {
             Self::General => "⚙",
             Self::Workspace => "▤",
+            Self::Relations => "↔",
             Self::Updates => "⟳",
             Self::About => "✦",
         }
@@ -661,7 +671,12 @@ impl Shell {
                     .padding([6, 10])
                     .height(Length::Fixed(44.0)),
             );
+        let has_relations = self.app.as_ref().is_some_and(|a| !a.data.relations.is_empty());
         for page in SettingsPage::ALL {
+            // the relations page stays listed while open, so removing the last one doesn't yank it away
+            if page == SettingsPage::Relations && !has_relations && current != page {
+                continue;
+            }
             let active = page == current;
             nav = nav.push(
                 button(
@@ -686,6 +701,7 @@ impl Shell {
         let content: Element<'_, ShellMessage> = match current {
             SettingsPage::General => self.page_general(),
             SettingsPage::Workspace => self.page_workspace(),
+            SettingsPage::Relations => self.page_relations(),
             SettingsPage::Updates => self.page_updates(),
             SettingsPage::About => self.page_about(),
         };
@@ -803,11 +819,6 @@ impl Shell {
                 .padding(14)
                 .style(ui::section_card),
             ));
-            page = page.push(setting(
-                t("settings-relations"),
-                t("settings-relations-help"),
-                relations_editor(app),
-            ));
         }
 
         let mut switch = Column::new().spacing(8).push(self.path_row(t("settings-open")));
@@ -841,6 +852,14 @@ impl Shell {
             example_row(),
         ))
         .into()
+    }
+
+    fn page_relations(&self) -> Element<'_, ShellMessage> {
+        let editor: Element<'_, ShellMessage> = match &self.app {
+            Some(app) => relations_editor(app),
+            None => hint(t("settings-no-relations")).into(),
+        };
+        setting(t("settings-relations"), t("settings-relations-help"), editor)
     }
 
     fn page_updates(&self) -> Element<'_, ShellMessage> {
