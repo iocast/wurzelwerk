@@ -5,6 +5,11 @@ Format: Keep a Changelog (https://keepachangelog.com), versioning: Semantic Vers
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-25
+
+### Changed
+- Own relationships moved to their own page, *Settings → Relationships*, which is listed only when the workspace has some
+
 ## [0.3.1] - 2026-10-25
 
 ### Added
@@ -73,7 +78,8 @@ Format: Keep a Changelog (https://keepachangelog.com), versioning: Semantic Vers
 - Update check against the latest GitHub release at start-up or via *Settings → Updates → Check now*; can be turned off
 - Large boards with 10 000 people stay smooth; `--demo RxC` generates such a board for load testing
 
-[unreleased]: https://github.com/iocast/wurzelwerk/compare/v0.3.1...HEAD
+[unreleased]: https://github.com/iocast/wurzelwerk/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/iocast/wurzelwerk/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/iocast/wurzelwerk/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/iocast/wurzelwerk/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/iocast/wurzelwerk/compare/v0.2.1...v0.2.2
