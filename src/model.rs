@@ -143,6 +143,63 @@ pub struct Link {
     pub end_port: Option<u8>,
     #[serde(default)]
     pub label_position: Option<LinkLabelPosition>,
+    /// Year the relation began and ended; both optional, within the years both people lived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_year: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_year: Option<i32>,
+}
+
+/// Why a typed relation year is not accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum YearError {
+    NotAYear,
+    /// Before the later of the two births.
+    TooEarly(i32),
+    /// After the earlier of the two deaths.
+    TooLate(i32),
+    EndBeforeStart,
+}
+
+/// Years both people were alive: (later birth, earlier death), each where known.
+pub fn shared_life<'a>(people: impl IntoIterator<Item = &'a Person>) -> (Option<i32>, Option<i32>) {
+    people.into_iter().fold((None, None), |(from, to), p| {
+        (
+            from.max(year_num(&p.born)),
+            match (to, year_num(&p.died)) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            },
+        )
+    })
+}
+
+/// Parses a typed relation year: empty means none, otherwise it must fall within `life`.
+pub fn check_year(text: &str, (from, to): (Option<i32>, Option<i32>)) -> Result<Option<i32>, YearError> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let year: i32 = text.parse().map_err(|_| YearError::NotAYear)?;
+    match (from, to) {
+        (Some(from), _) if year < from => Err(YearError::TooEarly(from)),
+        (_, Some(to)) if year > to => Err(YearError::TooLate(to)),
+        _ => Ok(Some(year)),
+    }
+}
+
+/// Checks typed start and end years of a relation together.
+pub fn check_years(
+    start: &str,
+    end: &str,
+    life: (Option<i32>, Option<i32>),
+) -> (Result<Option<i32>, YearError>, Result<Option<i32>, YearError>) {
+    let start = check_year(start, life);
+    let end = check_year(end, life).and_then(|e| match (&start, e) {
+        (Ok(Some(s)), Some(e)) if e < *s => Err(YearError::EndBeforeStart),
+        _ => Ok(e),
+    });
+    (start, end)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
@@ -507,7 +564,35 @@ mod tests {
             start_port: None,
             end_port: None,
             label_position: None,
+            start_year: None,
+            end_year: None,
         }
+    }
+
+    fn person(born: &str, died: &str) -> Person {
+        Person {
+            id: new_id(),
+            name: String::new(),
+            born: born.into(),
+            died: died.into(),
+            x: 0.0,
+            y: 0.0,
+            clans: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn relation_years_stay_within_both_lives() {
+        let (a, b) = (person("3 May 1900", "1980"), person("1910", ""));
+        let life = shared_life([&a, &b]);
+        assert_eq!(life, (Some(1910), Some(1980)));
+        assert_eq!(check_years("", "", life), (Ok(None), Ok(None)));
+        assert_eq!(check_years("1930", "1980", life), (Ok(Some(1930)), Ok(Some(1980))));
+        assert_eq!(check_years("1905", "", life).0, Err(YearError::TooEarly(1910)));
+        assert_eq!(check_years("", "1990", life).1, Err(YearError::TooLate(1980)));
+        assert_eq!(check_years("1950", "1940", life).1, Err(YearError::EndBeforeStart));
+        assert_eq!(check_years("19x0", "", life).0, Err(YearError::NotAYear));
+        assert_eq!(check_year("1", shared_life([&person("", ""), &person("", "")])), Ok(Some(1)));
     }
 
     // the only test that switches the language

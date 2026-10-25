@@ -98,6 +98,14 @@ line-remove-corner = Ausgewählte Ecke entfernen
 line-corner-help = Eine Ecke des Verlaufs anklicken, um sie auszuwählen und zu entfernen.
 line-reset-route = Auf automatischen Verlauf zurücksetzen
 line-route = VERLAUF
+line-years = ZEITRAUM
+line-start-year = Von Jahr
+line-end-year = Bis Jahr
+line-year-placeholder = optional
+line-year-not-a-year = Ein Jahr wie 1921 eingeben oder das Feld leer lassen.
+line-year-too-early = Muss { $year } oder später sein, solange beide Personen lebten.
+line-year-too-late = Muss { $year } oder früher sein, solange beide Personen lebten.
+line-year-end-before-start = Das Endjahr darf nicht vor dem Startjahr liegen.
 line-delete-help = Entf drücken, um diese Linie zu löschen.
 line-remove = Linie entfernen
 

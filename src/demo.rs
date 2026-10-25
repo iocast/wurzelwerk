@@ -219,6 +219,8 @@ impl Gen<'_> {
             start_port: None,
             end_port: None,
             label_position: None,
+            start_year: None,
+            end_year: None,
         });
     }
 

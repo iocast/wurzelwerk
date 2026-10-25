@@ -29,7 +29,7 @@ use crate::shell::SettingsPage;
 use crate::timeline::RangeSlider;
 use crate::model::{
     CLAN_BOX_H, CLAN_BOX_W, Clan, Data, Era, FileRec, Id, LINK_PRESETS, Link, LinkLabelPosition, LinkStyle, NODE_H, NODE_W,
-    PALETTE, Person, link_style, new_id, year_num,
+    PALETTE, Person, YearError, check_years, link_style, new_id, shared_life, year_num,
 };
 use crate::spatial::{self, Grid, Hull};
 use crate::store::{CLANS, Cmd, Db, FILES, LINKS, PEOPLE, RELATIONS};
@@ -108,6 +108,14 @@ pub struct PendingLink {
     pub label: String,
 }
 
+/// Start and end year of a line as typed; kept while a value is not valid yet.
+#[derive(Debug, Clone)]
+pub struct LinkYears {
+    pub link: Id,
+    pub start: String,
+    pub end: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClanChoice {
     pub id: Id,
@@ -159,6 +167,8 @@ pub struct App {
     pub show_clan: bool,
     pub search: String,
     pub pending_link: Option<PendingLink>,
+    /// Typed years of the selected line (see [`LinkYears`]).
+    pub link_years: Option<LinkYears>,
     /// Person with unsaved text edits (flushed on submit / selection change / tick).
     pub dirty: Option<Id>,
     pub notice: Option<String>,
@@ -251,6 +261,8 @@ pub enum Message {
     SetLinkLabel(String),
     /// Keeps the selected line's name as a relation (Enter in its name field).
     RememberLinkLabel,
+    EditLinkStart(String),
+    EditLinkEnd(String),
     // relations (workspace settings)
     RenameRelation(Id, &'static str, String),
     DeleteRelation(Id),
@@ -353,6 +365,7 @@ impl App {
             show_clan: false,
             search: String::new(),
             pending_link: None,
+            link_years: None,
             dirty: None,
             notice: None,
             notice_at: None,
@@ -462,13 +475,16 @@ impl App {
         self.years.is_some_and(|(_, to)| p.era(to) == Era::Dead)
     }
 
-    /// A line is drawn while both of its people are shown, and a line whose name holds a
-    /// year ("married 1789") once the range reaches that year.
+    /// A line is drawn while both of its people are shown, from its start year (or a year
+    /// in its name, "married 1789") and up to its end year.
     pub fn link_shown(&self, link: &Link) -> bool {
-        let Some((_, to)) = self.years else {
+        let Some((from, to)) = self.years else {
             return true;
         };
-        year_num(&link.label).is_none_or(|since| to >= since)
+        link.start_year
+            .or_else(|| year_num(&link.label))
+            .is_none_or(|since| to >= since)
+            && link.end_year.is_none_or(|until| until >= from)
             && [&link.from, &link.to]
                 .into_iter()
                 .all(|id| self.data.person(id).is_some_and(|p| self.shown(p)))
@@ -639,6 +655,49 @@ impl App {
             .map(|&id| t(id))
             .chain(self.data.relations.iter().map(|r| r.name()))
             .filter(|name| !name.is_empty())
+    }
+
+    /// Years both people of a line were alive.
+    fn link_life(&self, link: &Link) -> (Option<i32>, Option<i32>) {
+        shared_life([&link.from, &link.to].into_iter().filter_map(|id| self.data.person(id)))
+    }
+
+    /// Typed years of `link`: the pending text, else the stored years.
+    fn typed_years(&self, link: &Link) -> LinkYears {
+        match &self.link_years {
+            Some(y) if y.link == link.id => y.clone(),
+            _ => {
+                let text = |y: Option<i32>| y.map(|y| y.to_string()).unwrap_or_default();
+                LinkYears {
+                    link: link.id.clone(),
+                    start: text(link.start_year),
+                    end: text(link.end_year),
+                }
+            }
+        }
+    }
+
+    /// Edits the selected line's typed years; they are stored once both are valid.
+    fn edit_link_years(&mut self, edit: impl FnOnce(&mut LinkYears)) {
+        let Some(link) = self
+            .selected_link
+            .as_ref()
+            .and_then(|id| self.data.links.iter().find(|l| &l.id == id))
+        else {
+            return;
+        };
+        let mut years = self.typed_years(link);
+        edit(&mut years);
+        if let (Ok(start), Ok(end)) = check_years(&years.start, &years.end, self.link_life(link))
+            && (link.start_year, link.end_year) != (start, end)
+        {
+            let id = link.id.clone();
+            if let Some(link) = self.data.links.iter_mut().find(|l| l.id == id) {
+                (link.start_year, link.end_year) = (start, end);
+            }
+            self.save_link(&id);
+        }
+        self.link_years = Some(years);
     }
 
     fn save_link(&self, id: &str) {
@@ -1136,6 +1195,8 @@ impl App {
                         },
                         route: Vec::new(),
                         label_position: None,
+                        start_year: None,
+                        end_year: None,
                         start_port: None,
                         end_port: None,
                     };
@@ -1156,6 +1217,8 @@ impl App {
                     self.save_link(&id);
                 }
             }
+            Message::EditLinkStart(v) => self.edit_link_years(|y| y.start = v),
+            Message::EditLinkEnd(v) => self.edit_link_years(|y| y.end = v),
             Message::SetLinkLabel(label) => return self.handle(Message::EditLinkLabel(label)),
             Message::RememberLinkLabel => {
                 if let Some(label) = self
@@ -2593,6 +2656,7 @@ impl App {
                 ]
                 .spacing(10),
             ),
+            self.view_link_years(link),
             card(t("line-route"), route),
             danger_zone(
                 t("line-delete-help"),
@@ -2602,6 +2666,50 @@ impl App {
         ]
         .spacing(16)
         .into()
+    }
+
+    fn view_link_years(&self, link: &Link) -> Element<'_, Message> {
+        let years = self.typed_years(link);
+        let (start, end) = check_years(&years.start, &years.end, self.link_life(link));
+        let field = |label, placeholder, value: String, on_input: fn(String) -> Message, ok: bool| {
+            labelled(
+                label,
+                text_input(placeholder, &value)
+                    .on_input(on_input)
+                    .size(13)
+                    .padding([7, 10])
+                    .style(if ok { ui::input } else { ui::input_error }),
+            )
+        };
+        let mut body = Column::new().spacing(8).push(
+            row![
+                field(
+                    t("line-start-year"),
+                    t("line-year-placeholder"),
+                    years.start,
+                    Message::EditLinkStart,
+                    start.is_ok(),
+                ),
+                field(
+                    t("line-end-year"),
+                    t("line-year-placeholder"),
+                    years.end,
+                    Message::EditLinkEnd,
+                    end.is_ok(),
+                ),
+            ]
+            .spacing(10),
+        );
+        for error in [start.err(), end.err()].into_iter().flatten() {
+            let message = match error {
+                YearError::NotAYear => t("line-year-not-a-year").to_owned(),
+                YearError::TooEarly(year) => tf("line-year-too-early", &[("year", year.to_string().into())]),
+                YearError::TooLate(year) => tf("line-year-too-late", &[("year", year.to_string().into())]),
+                YearError::EndBeforeStart => t("line-year-end-before-start").to_owned(),
+            };
+            body = body.push(text(message).size(12).color(ui::pal().danger));
+        }
+        card(t("line-years"), body)
     }
 
     fn view_person<'a>(&'a self, p: &'a Person) -> Element<'a, Message> {

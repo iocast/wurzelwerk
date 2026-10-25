@@ -569,6 +569,13 @@ pub fn input(theme: &Theme, status: text_input::Status) -> text_input::Style {
     input_with(R_MD)(theme, status)
 }
 
+/// Field holding a value that is not accepted.
+pub fn input_error(theme: &Theme, status: text_input::Status) -> text_input::Style {
+    let mut style = input(theme, status);
+    style.border.color = pal().danger;
+    style
+}
+
 /// Pill-shaped search field.
 pub fn search(theme: &Theme, status: text_input::Status) -> text_input::Style {
     let mut style = input_with(100.0)(theme, status);

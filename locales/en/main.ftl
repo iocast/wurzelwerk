@@ -95,6 +95,14 @@ line-remove-corner = Remove selected corner
 line-corner-help = Click a route corner to select and remove it.
 line-reset-route = Reset to automatic route
 line-route = ROUTE
+line-years = PERIOD
+line-start-year = From year
+line-end-year = To year
+line-year-placeholder = optional
+line-year-not-a-year = Enter a year like 1921, or leave the field empty.
+line-year-too-early = Must be { $year } or later, while both people were alive.
+line-year-too-late = Must be { $year } or earlier, while both people were alive.
+line-year-end-before-start = The end year must not be before the start year.
 line-delete-help = Press Delete to remove this line.
 line-remove = Remove line
 
